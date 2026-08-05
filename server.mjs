@@ -70,7 +70,7 @@ async function api(req,res,url) {
   if (req.method==='POST' && url.pathname==='/api/duties') {
     const actor=await b24User(req); if(!(actor && (actor.IS_ADMIN===true || actor.IS_ADMIN==='Y'))) return json(res,403,{error:'Изменять график может только администратор портала'});
     const v=await body(req); if(!['office','support','holiday'].includes(v.kind)||!v.starts_on||!v.ends_on||!Number(v.employee_id)) return json(res,422,{error:'Заполните тип, сотрудника и даты'});
-    const hours=v.kind==='office'?0:(v.kind==='support'&&v.starts_on===v.ends_on?2:4);
+    const hours=v.kind==='office'?0:(v.kind==='holiday'||v.starts_on===v.ends_on?2:4);
     const r=db.prepare('INSERT INTO duties (kind,starts_on,ends_on,employee_id,hours) VALUES (?,?,?,?,?)').run(v.kind,v.starts_on,v.ends_on,Number(v.employee_id),hours);
     if(hours) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.starts_on,-hours,'support',r.lastInsertRowid,'Зачтено дежурством поддержки');
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Назначено дежурство', `${v.kind}: ${v.starts_on}–${v.ends_on}`); return json(res,201,snapshot(actor));
