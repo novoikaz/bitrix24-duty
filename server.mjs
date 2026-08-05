@@ -79,6 +79,13 @@ async function api(req,res,url) {
     if(hours) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.starts_on,-hours,'support',r.lastInsertRowid,'Зачтено дежурством поддержки');
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Назначено дежурство', `${v.kind}: ${v.starts_on}–${v.ends_on}`); return json(res,201,snapshot(actor));
   }
+  const deleteMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/delete$/);
+  if (req.method==='POST' && deleteMatch) {
+    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Удалять назначения может только администратор портала'});
+    const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(deleteMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
+    db.prepare('DELETE FROM ledger WHERE reference_id=? AND kind=?').run(duty.id,'support'); db.prepare('DELETE FROM duties WHERE id=?').run(duty.id);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Удалено дежурство', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,snapshot(actor));
+  }
   if (req.method==='POST' && url.pathname==='/api/absences') {
     const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Вносить отсутствие может только администратор портала'});
     const v=await body(req); const hours=Number(v.hours); if(!Number(v.employee_id)||!v.occurred_on||!hours||hours>24) return json(res,422,{error:'Проверьте данные отсутствия'});
