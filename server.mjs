@@ -47,7 +47,7 @@ const balance = id => db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM le
 function snapshot(user=null) {
   return {
     employees: db.prepare('SELECT * FROM employees ORDER BY name').all(),
-    duties: db.prepare(`SELECT d.*, e.name, e.avatar FROM duties d JOIN employees e ON e.id=d.employee_id WHERE d.status='scheduled' ORDER BY d.starts_on`).all(),
+    duties: db.prepare(`SELECT d.*, e.name, e.avatar FROM duties d JOIN employees e ON e.id=d.employee_id WHERE d.status!='cancelled' ORDER BY d.starts_on`).all(),
     absences: db.prepare(`SELECT a.*, e.name FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
     balances: db.prepare('SELECT id,name,avatar FROM employees').all().map(e=>({...e, hours:balance(e.id)})),
     audit: db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 15').all(),
@@ -76,8 +76,16 @@ async function api(req,res,url) {
     const v=await body(req); if(!['office','support','holiday'].includes(v.kind)||!v.starts_on||!v.ends_on||!Number(v.employee_id)) return json(res,422,{error:'Заполните тип, сотрудника и даты'});
     const hours=v.kind==='office'?0:(v.kind==='holiday'||v.starts_on===v.ends_on?2:4);
     const r=db.prepare('INSERT INTO duties (kind,starts_on,ends_on,employee_id,hours) VALUES (?,?,?,?,?)').run(v.kind,v.starts_on,v.ends_on,Number(v.employee_id),hours);
-    if(hours) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.starts_on,-hours,'support',r.lastInsertRowid,'Зачтено дежурством поддержки');
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Назначено дежурство', `${v.kind}: ${v.starts_on}–${v.ends_on}`); return json(res,201,snapshot(actor));
+  }
+  const confirmMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/confirm$/);
+  if (req.method==='POST' && confirmMatch) {
+    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Подтверждать дежурства может только администратор портала'});
+    const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(confirmMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
+    if(duty.status==='confirmed') return json(res,409,{error:'Дежурство уже подтверждено'});
+    db.prepare('UPDATE duties SET status=? WHERE id=?').run('confirmed',duty.id);
+    if(duty.hours) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(duty.employee_id,duty.ends_on,-duty.hours,'support',duty.id,'Подтверждённое дежурство поддержки');
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждено дежурство', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,snapshot(actor));
   }
   const deleteMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/delete$/);
   if (req.method==='POST' && deleteMatch) {
