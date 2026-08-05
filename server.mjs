@@ -34,9 +34,12 @@ async function b24User(req) {
   const allowed=String(process.env.BITRIX_DOMAIN||'novoi.bitrix24.kz').toLowerCase();
   if(!token || domain!==allowed) return null;
   const cached=authCache.get(token); if(cached && cached.until>Date.now()) return cached.user;
-  const reply=await fetch(`https://${domain}/rest/user.current.json?auth=${encodeURIComponent(token)}`);
-  const payload=await reply.json(); const user=payload.result;
-  if(!user?.ID) return null; authCache.set(token,{user,until:Date.now()+60_000}); return user;
+  const [profileReply, adminReply]=await Promise.all([
+    fetch(`https://${domain}/rest/user.current.json?auth=${encodeURIComponent(token)}`),
+    fetch(`https://${domain}/rest/user.admin.json?auth=${encodeURIComponent(token)}`)
+  ]);
+  const profile=await profileReply.json(), admin=await adminReply.json(); const user=profile.result;
+  if(!user?.ID) return null; user.app_admin=admin.result===true; authCache.set(token,{user,until:Date.now()+60_000}); return user;
 }
 const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || (await b24User(req))?.IS_ADMIN === 'Y');
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
@@ -48,27 +51,28 @@ function snapshot(user=null) {
     absences: db.prepare(`SELECT a.*, e.name FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
     balances: db.prepare('SELECT id,name,avatar FROM employees').all().map(e=>({...e, hours:balance(e.id)})),
     audit: db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 15').all(),
-    permissions: { canEdit: Boolean(user && (user.IS_ADMIN===true || user.IS_ADMIN==='Y')) },
+    permissions: { canEdit: Boolean(user?.app_admin) },
     currentEmployeeId: user ? Number(user.ID) : null
   };
 }
 async function syncEmployees(req) {
   const user=await b24User(req); if(!user) throw new Error('Не удалось подтвердить пользователя Bitrix24');
-  const domain=req.headers['x-b24-domain'], token=req.headers['x-b24-token']; let start=0, users=[];
-  do { const reply=await fetch(`https://${domain}/rest/user.get.json?auth=${encodeURIComponent(token)}&start=${start}`); const data=await reply.json(); users.push(...(data.result||[])); start=data.next ?? null; } while(start!==null);
+  const domain=req.headers['x-b24-domain'], token=req.headers['x-b24-token']; let start=0, users=[], total=Infinity;
+  while(start<total) { const reply=await fetch(`https://${domain}/rest/user.get.json?auth=${encodeURIComponent(token)}&ADMIN_MODE=Y&start=${start}`); const data=await reply.json(); const page=data.result||[]; users.push(...page); total=Number(data.total||page.length); start+=50; }
+  if(!users.length) users=[user];
   if(!db.prepare("SELECT 1 FROM meta WHERE key='bitrix_synced'").get()) {
     db.exec('DELETE FROM ledger; DELETE FROM absences; DELETE FROM duties; DELETE FROM employees;');
     db.prepare("INSERT INTO meta(key,value) VALUES ('bitrix_synced','1')").run();
   }
   const save=db.prepare('INSERT INTO employees(id,name,avatar,is_admin) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,avatar=excluded.avatar,is_admin=excluded.is_admin');
-  for(const e of users.filter(x=>x.ACTIVE!==false && x.ACTIVE!=='N')) save.run(Number(e.ID),`${e.NAME||''} ${e.LAST_NAME||''}`.trim()||e.LOGIN,e.PERSONAL_PHOTO||'',e.IS_ADMIN===true||e.IS_ADMIN==='Y'?1:0);
+  for(const e of users.filter(x=>x.ACTIVE!==false && x.ACTIVE!=='N')) save.run(Number(e.ID),`${e.NAME||''} ${e.LAST_NAME||''}`.trim()||e.LOGIN,e.PERSONAL_PHOTO||'',Number(e.ID)===Number(user.ID)&&user.app_admin?1:0);
   return user;
 }
 async function api(req,res,url) {
   if (req.method==='POST' && url.pathname==='/api/bitrix/sync') { const user=await syncEmployees(req); return json(res,200,snapshot(user)); }
   if (req.method==='GET' && url.pathname==='/api/bootstrap') { const user=await b24User(req); return json(res,200,snapshot(user)); }
   if (req.method==='POST' && url.pathname==='/api/duties') {
-    const actor=await b24User(req); if(!(actor && (actor.IS_ADMIN===true || actor.IS_ADMIN==='Y'))) return json(res,403,{error:'Изменять график может только администратор портала'});
+    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Изменять график может только администратор портала'});
     const v=await body(req); if(!['office','support','holiday'].includes(v.kind)||!v.starts_on||!v.ends_on||!Number(v.employee_id)) return json(res,422,{error:'Заполните тип, сотрудника и даты'});
     const hours=v.kind==='office'?0:(v.kind==='holiday'||v.starts_on===v.ends_on?2:4);
     const r=db.prepare('INSERT INTO duties (kind,starts_on,ends_on,employee_id,hours) VALUES (?,?,?,?,?)').run(v.kind,v.starts_on,v.ends_on,Number(v.employee_id),hours);
@@ -76,7 +80,7 @@ async function api(req,res,url) {
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Назначено дежурство', `${v.kind}: ${v.starts_on}–${v.ends_on}`); return json(res,201,snapshot(actor));
   }
   if (req.method==='POST' && url.pathname==='/api/absences') {
-    const actor=await b24User(req); if(!(actor && (actor.IS_ADMIN===true || actor.IS_ADMIN==='Y'))) return json(res,403,{error:'Вносить отсутствие может только администратор портала'});
+    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Вносить отсутствие может только администратор портала'});
     const v=await body(req); const hours=Number(v.hours); if(!Number(v.employee_id)||!v.occurred_on||!hours||hours>24) return json(res,422,{error:'Проверьте данные отсутствия'});
     const r=db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note) VALUES (?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,v.note||'');
     db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
