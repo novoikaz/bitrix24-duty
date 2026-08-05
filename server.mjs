@@ -69,8 +69,8 @@ async function api(req,res,url) {
 }
 const mime={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'};
 const server=http.createServer(async(req,res)=>{ try {
-  const url=new URL(req.url,`http://${req.headers.host}`); if(url.pathname.startsWith('/api/')||url.pathname==='/install') return api(req,res,url);
-  const file=url.pathname==='/'?'index.html':url.pathname.replace(/^\//,''); const path=join(process.cwd(),'public',file);
+  const url=new URL(req.url,`http://${req.headers.host}`); if(url.pathname.startsWith('/api/') || (url.pathname==='/install' && req.method!=='GET')) return api(req,res,url);
+  const file=url.pathname==='/'?'index.html':url.pathname==='/install'?'install.html':url.pathname.replace(/^\//,''); const path=join(process.cwd(),'public',file);
   if(!path.startsWith(join(process.cwd(),'public')) || !existsSync(path)) return json(res,404,{error:'Страница не найдена'});
   res.writeHead(200,{'content-type':mime[extname(path)]||'application/octet-stream'}); res.end(await readFile(path));
 } catch(e) { console.error(e); json(res,500,{error:e.message||'Внутренняя ошибка'}); }});
