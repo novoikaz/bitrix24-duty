@@ -116,6 +116,6 @@ const server=http.createServer(async(req,res)=>{ try {
   const url=new URL(req.url,`http://${req.headers.host}`); if(url.pathname.startsWith('/api/') || (url.pathname==='/install' && req.method!=='GET')) return api(req,res,url);
   const file=url.pathname==='/'?'index.html':url.pathname==='/install'?'install.html':url.pathname.replace(/^\//,''); const path=join(process.cwd(),'public',file);
   if(!path.startsWith(join(process.cwd(),'public')) || !existsSync(path)) return json(res,404,{error:'Страница не найдена'});
-  res.writeHead(200,{'content-type':mime[extname(path)]||'application/octet-stream'}); res.end(await readFile(path));
+  res.writeHead(200,{'content-type':mime[extname(path)]||'application/octet-stream'}); const content=await readFile(path); res.end(file==='index.html'?String(content).replace('</body>','<script src="/features.js"></script></body>'):content);
 } catch(e) { console.error(e); json(res,500,{error:e.message||'Внутренняя ошибка'}); }});
 server.listen(port, process.env.HOST || '0.0.0.0', ()=>console.log(`Дежурства: http://localhost:${port}`));
