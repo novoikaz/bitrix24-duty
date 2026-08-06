@@ -55,7 +55,15 @@ async function notifyByWebhook(employeeId,message) {
   const response=await fetch(`${base}/im.notify.json`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({TO_USER_ID:String(employeeId),MESSAGE:message})});
   const data=await response.json(); if(!response.ok||data.error) throw new Error(data.error_description||data.error||'Bitrix24 не принял уведомление');
 }
-function almatyNow(){const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Almaty',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});const values=Object.fromEntries(formatter.formatToParts(new Date()).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));return {date:`${values.year}-${values.month}-${values.day}`,hour:Number(values.hour),minute:Number(values.minute)};}
+function almatyNow(){const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Almaty',year:'numeric',month:'2-digit',day:'2-digit',weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});const values=Object.fromEntries(formatter.formatToParts(new Date()).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));return {date:`${values.year}-${values.month}-${values.day}`,weekday:values.weekday,hour:Number(values.hour),minute:Number(values.minute)};}
+async function sendDueReminders(kind,now=almatyNow()){
+  const scheduledHour=kind==='office'?14:6;
+  if(now.hour!==scheduledHour||now.minute>5) return 0;
+  const duties=db.prepare("SELECT * FROM duties WHERE starts_on=? AND status='scheduled' AND (kind=? OR (?='support' AND kind='holiday'))").all(now.date,kind,kind); let sent=0;
+  for(const duty of duties){if(db.prepare('SELECT 1 FROM notifications WHERE duty_id=? AND type=?').get(duty.id,'three_hours'))continue;await notifyByWebhook(duty.employee_id,dutyMessage(duty));db.prepare('INSERT INTO notifications(duty_id,type) VALUES (?,?)').run(duty.id,'three_hours');sent++;}
+  if(sent)audit('Автоматическое напоминание','Отправлены напоминания',`${kind}: ${sent}`); return sent;
+}
+async function reminderTick(){try{const now=almatyNow();if(now.weekday==='Fri')await sendDueReminders('office',now);if(now.weekday==='Sat')await sendDueReminders('support',now)}catch(error){console.error('Reminder error:',error.message)}}
 function snapshot(user=null) {
   return {
     employees: db.prepare('SELECT * FROM employees ORDER BY name').all(),
@@ -164,15 +172,6 @@ async function api(req,res,url) {
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(remindMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     await notifyByWebhook(duty.employee_id,dutyMessage(duty)); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Отправлено напоминание', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,{ok:true});
   }
-  if(req.method==='POST' && url.pathname==='/api/reminders/run') {
-    if(!process.env.CRON_SECRET||req.headers['x-cron-secret']!==process.env.CRON_SECRET) return json(res,401,{error:'Нет доступа к запуску напоминаний'});
-    const now=almatyNow(), type=url.searchParams.get('type');
-    const kind=type==='office'?'office':'support', scheduledHour=kind==='office'?14:6;
-    if(now.hour!==scheduledHour||now.minute>5) return json(res,200,{ok:true,sent:0,message:'Не время для отправки'});
-    const duties=db.prepare("SELECT * FROM duties WHERE starts_on=? AND status='scheduled' AND (kind=? OR (?='support' AND kind='holiday'))").all(now.date,kind,kind); let sent=0;
-    for(const duty of duties){if(db.prepare('SELECT 1 FROM notifications WHERE duty_id=? AND type=?').get(duty.id,'three_hours'))continue;await notifyByWebhook(duty.employee_id,dutyMessage(duty));db.prepare('INSERT INTO notifications(duty_id,type) VALUES (?,?)').run(duty.id,'three_hours');sent++;}
-    audit('Автоматическое напоминание','Отправлены напоминания',`${kind}: ${sent}`); return json(res,200,{ok:true,sent});
-  }
   if (req.method==='POST' && url.pathname==='/install') {
     // Bitrix24 local-app handler: persist tokens per portal. Encrypt these columns with KMS in production.
     const raw=await new Promise(resolve=>{let s='';req.on('data',x=>s+=x);req.on('end',()=>resolve(Object.fromEntries(new URLSearchParams(s))))});
@@ -190,4 +189,4 @@ const server=http.createServer(async(req,res)=>{ try {
   if(!path.startsWith(join(process.cwd(),'public')) || !existsSync(path)) return json(res,404,{error:'Страница не найдена'});
   res.writeHead(200,{'content-type':mime[extname(path)]||'application/octet-stream'}); const content=await readFile(path); res.end(file==='index.html'?String(content).replace('</body>','<script src="/features.js"></script></body>'):content);
 } catch(e) { console.error(e); json(res,500,{error:e.message||'Внутренняя ошибка'}); }});
-server.listen(port, process.env.HOST || '0.0.0.0', ()=>console.log(`Дежурства: http://localhost:${port}`));
+server.listen(port, process.env.HOST || '0.0.0.0', ()=>{console.log(`Дежурства: http://localhost:${port}`); reminderTick(); setInterval(reminderTick,60_000);});
