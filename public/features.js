@@ -33,6 +33,24 @@
   if(window.BX24)BX24.init(bind);else window.addEventListener('load',bind);
 })();
 
+/* Визуальное оформление карточек обмена. */
+(()=>{
+  const style=document.createElement('style');
+  style.textContent=`
+    .swap-form{grid-template-columns:minmax(230px,1.2fr) minmax(220px,.85fr) auto!important;gap:12px!important;background:#f8faff;border:1px solid #e3eaf6;border-radius:14px;padding:16px 18px;margin:14px 0!important;box-shadow:0 1px 1px #1b356008}
+    .swap-form>div:first-child{align-self:center}.swap-form>div:first-child b{display:block;font-size:15px;color:#17223b}.swap-form>div:first-child .muted{margin-top:3px;font-weight:700;color:#4d668f}
+    .swap-select{display:grid;gap:5px;color:#6c7b94;font:700 11px/1.2 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.03em}
+    .swap-form select,.swap-form input{width:100%;min-height:42px;border:1px solid #d5dfed!important;border-radius:9px!important;background:#fff!important;color:#253653!important;font:14px/1.3 Inter,system-ui,sans-serif!important;padding:9px 11px!important;outline:none;box-shadow:none!important}
+    .swap-form select:focus,.swap-form input:focus{border-color:#4c7cf0!important;box-shadow:0 0 0 3px #4c7cf020!important}
+    .swap-form button:not([data-remind]){min-height:42px;white-space:nowrap;border:0!important;border-radius:9px!important;background:#3268e9!important;color:#fff!important;padding:10px 15px!important;font:700 13px/1.2 Inter,system-ui,sans-serif!important;box-shadow:0 4px 10px #3268e92b}
+    .swap-form input[name="note"]{grid-column:1/-1!important;color:#5e6c84!important}
+    .swap-form [data-remind]{grid-column:1/-1!important;justify-self:start!important;min-height:auto!important;border:0!important;background:transparent!important;color:#4d668f!important;padding:2px 0!important;font-size:12px!important;font-weight:700!important}
+    .swap-form [data-remind]::before{content:'✉';margin-right:6px;color:#3268e9}
+    @media(max-width:760px){.swap-form{grid-template-columns:1fr!important;padding:14px}.swap-form input[name="note"],.swap-form [data-remind]{grid-column:auto!important}.swap-form button:not([data-remind]){width:100%}}
+  `;
+  document.head.append(style);
+})();
+
 /* Личный кабинет обменов: отдельный слой, не вмешивается в загрузку календаря. */
 (()=>{
   let headers={};
@@ -46,6 +64,7 @@
     const admin=data.permissions.canEdit?data.swapRequests.filter(item=>item.status==='pending_admin'):[];
     const people=data.employees.filter(item=>item.id!==me.id).map(item=>`<option value="${item.id}">${esc(item.name)}</option>`).join('');
     document.querySelector('.main').innerHTML=`<div class="report-page"><header class="top"><div><div class="eyebrow">novoi.bitrix24.kz</div><h1>Мой баланс и обмены</h1><div class="sub">Баланс: <b>${balance} ч</b> к компенсации</div></div></header><section class="report-card"><h2>Предложить замену</h2><p class="muted">Выберите своё назначенное дежурство и сотрудника. Он должен согласиться, после чего администратор подтверждает обмен.</p>${mine.length?mine.map(duty=>`<form class="swap-form" data-duty="${duty.id}" style="display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:10px;align-items:end;margin-top:12px"><div><b>${duty.kind==='office'?'Офис':'Поддержка'} · ${duty.starts_on} — ${duty.ends_on}</b><div class="muted">${duty.hours} ч</div></div><select name="to_employee_id">${people}</select><button>Предложить обмен</button><input style="grid-column:1/-1" name="note" placeholder="Комментарий для сотрудника (необязательно)">${data.permissions.canEdit?`<button type="button" data-remind="${duty.id}" style="grid-column:1/-1">Отправить напоминание сейчас</button>`:''}</form>`).join(''):'<div class="empty-note">У вас нет назначенных дежурств, которые можно обменять.</div>'}</section><section class="report-card"><h2>Мне предложили обмен</h2>${incoming.length?`<table class="report-table"><tr><th>От кого</th><th>Период</th><th>Часы</th><th></th></tr>${incoming.map(item=>`<tr><td>${esc(item.from_name)}</td><td>${item.starts_on} — ${item.ends_on}</td><td>${item.hours} ч</td><td><button data-accept="${item.id}">Согласиться</button> <button class="danger" data-reject-swap="${item.id}">Отклонить</button></td></tr>`).join('')}</table>`:'<div class="empty-note">Новых предложений нет.</div>'}</section>${data.permissions.canEdit?`<section class="report-card"><h2>Обмены на подтверждении</h2>${admin.length?`<table class="report-table"><tr><th>Кто меняется</th><th>Период</th><th></th></tr>${admin.map(item=>`<tr><td>${esc(item.from_name)} → ${esc(item.to_name)}</td><td>${item.starts_on} — ${item.ends_on} · ${item.hours} ч</td><td><button class="primary" data-approve="${item.id}">Подтвердить обмен</button> <button class="danger" data-reject-swap="${item.id}">Отклонить</button></td></tr>`).join('')}</table>`:'<div class="empty-note">Нет обменов, ожидающих решения администратора.</div>'}</section>`:''}<p><button onclick="location.reload()">← К календарю</button></p></div>`;
+    document.querySelectorAll('.swap-form select').forEach(select=>{const label=document.createElement('label');label.className='swap-select';label.innerHTML='<span>Кому передать дежурство</span>';select.before(label);label.append(select)});
     document.querySelectorAll('.swap-form').forEach(form=>form.onsubmit=async event=>{event.preventDefault();try{await api('/api/swaps','POST',{duty_id:form.dataset.duty,...Object.fromEntries(new FormData(form))});alert('Предложение отправлено сотруднику.');open()}catch(error){alert(error.message)}});
     document.querySelectorAll('[data-accept]').forEach(button=>button.onclick=()=>action(button.dataset.accept,'accept'));
     document.querySelectorAll('[data-approve]').forEach(button=>button.onclick=()=>action(button.dataset.approve,'approve'));
