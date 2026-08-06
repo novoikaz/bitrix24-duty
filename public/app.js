@@ -18,7 +18,7 @@ function person(duty){return duty?`<div class="person">${ava(duty)}<div><b>${esc
 function addCalendarToolbar(){
   if($('#monthTitle'))return;
   const style=document.createElement('style');
-  style.textContent=`.calendarbar{display:flex;align-items:center;justify-content:space-between;margin:18px 0 10px}.calendarbar h2{margin:0;font-size:17px}.calnav{display:flex;gap:7px}.day.empty{background:#fcfdff}.day.current-week{background:#f4f7ff;box-shadow:inset 0 2px #b8cbef,inset 0 -2px #b8cbef}.delete{margin-left:auto;border:0;background:transparent;color:inherit;padding:0 2px;font-size:16px;line-height:1}.event.admin-event{cursor:pointer}.ops{grid-template-columns:repeat(3,1fr);align-items:stretch}.ops .card{height:282px;overflow:hidden}.ops #audit{height:215px;overflow-y:auto;padding-right:7px}.ops #audit::-webkit-scrollbar{width:6px}.ops #audit::-webkit-scrollbar-thumb{background:#d5dceb;border-radius:8px}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{text-align:left;border-bottom:1px solid #e7ecf4;padding:9px;font-size:13px}`;
+  style.textContent=`.calendarbar{display:flex;align-items:center;justify-content:space-between;margin:18px 0 10px}.calendarbar h2{margin:0;font-size:17px}.calnav{display:flex;gap:7px}.day.empty{background:#fcfdff}.day.current-week{background:#f4f7ff;box-shadow:inset 0 2px #b8cbef,inset 0 -2px #b8cbef}.delete{margin-left:auto;border:0;background:transparent;color:inherit;padding:0 2px;font-size:16px;line-height:1}.event.admin-event{cursor:pointer}.ops{grid-template-columns:repeat(3,1fr);align-items:stretch}.ops .card{height:282px;overflow:hidden}.ops #audit{height:215px;overflow-y:auto;padding-right:7px}.ops #audit::-webkit-scrollbar{width:6px}.ops #audit::-webkit-scrollbar-thumb{background:#d5dceb;border-radius:8px}.office-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}.office-actions button{font-size:11px;padding:6px 8px}.office-actions .ack{background:#3268e9;color:#fff;border-color:#3268e9}.office-actions .decline{color:#a13b3b}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{text-align:left;border-bottom:1px solid #e7ecf4;padding:9px;font-size:13px}`;
   document.head.append(style);
   $('#notice').remove();
   const bar=document.createElement('section');
@@ -59,7 +59,17 @@ function render(){
   $('#balance').parentElement.querySelector(':scope > .sub').textContent='Отрицательное число — часы, которые нужно отдежурить.';
   const nextOffice=state.duties.find(item=>item.kind==='office'&&item.ends_on>=dateKey(now));
   const nextSupport=state.duties.find(item=>(item.kind==='support'||item.kind==='holiday')&&item.ends_on>=dateKey(now));
-  $('#office').innerHTML=person(office||nextOffice);
+  const shownOffice=office||nextOffice;
+  $('#office').innerHTML=person(shownOffice);
+  if(shownOffice?.kind==='office'){
+    const mine=shownOffice.employee_id===state.currentEmployeeId, admin=state.permissions.canEdit;
+    const labels={scheduled:'Ожидается подтверждение сотрудника',acknowledged:'Сотрудник подтвердил готовность',declined:'Сотрудник не может дежурить',completed:'Выполнено'};
+    let actions=`<div class="sub" style="margin-top:7px">${labels[shownOffice.office_status]||labels.scheduled}</div>`;
+    if(mine&&shownOffice.office_status==='scheduled')actions+=`<div class="office-actions"><button class="ack" data-office-action="acknowledge">Подтверждаю</button><button class="decline" data-office-action="decline">Не могу</button></div>`;
+    if(admin&&shownOffice.office_status==='acknowledged')actions+=`<div class="office-actions"><button class="ack" data-office-action="complete">Подтвердить выполнение</button></div>`;
+    $('#office').insertAdjacentHTML('beforeend',actions);
+    document.querySelectorAll('[data-office-action]').forEach(button=>button.onclick=async()=>{const action=button.dataset.officeAction,note=action==='decline'?prompt('Коротко укажите причину (необязательно):')||'':'';const response=await api(`/api/duties/${shownOffice.id}/office/${action}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({note})}),data=await response.json();if(!response.ok)return toast(data.error);state=data;toast(action==='acknowledge'?'Готовность подтверждена':action==='decline'?'Администратор увидит отказ':'Выполнение подтверждено');render()});
+  }
   $('#support').innerHTML=person(support||nextSupport);
   $('#audit').innerHTML=state.audit.length?state.audit.map(item=>`<div class="line"><strong>${esc(item.action)}</strong>${esc(item.detail)}<br>${item.occurred_at}</div>`).join(''):'Пока нет изменений';
   const admin=state.permissions.canEdit;$('#mode').textContent=admin?'Администратор портала':'Режим просмотра';

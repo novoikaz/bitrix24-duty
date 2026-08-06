@@ -19,6 +19,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `);
 if (!db.prepare('PRAGMA table_info(duties)').all().some(column=>column.name==='accounting_mode')) db.exec("ALTER TABLE duties ADD COLUMN accounting_mode TEXT NOT NULL DEFAULT 'schedule'");
+if (!db.prepare('PRAGMA table_info(duties)').all().some(column=>column.name==='office_status')) db.exec("ALTER TABLE duties ADD COLUMN office_status TEXT NOT NULL DEFAULT 'scheduled'");
 
 if (!db.prepare('SELECT count(*) AS n FROM employees').get().n) {
   const add = db.prepare('INSERT INTO employees (id,name,avatar,is_admin) VALUES (?,?,?,?)');
@@ -57,7 +58,7 @@ const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || 
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
 const balance = id => db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?').get(id).hours;
 const dutyMessage = duty => duty.kind==='office'
-  ? `Напоминание: сегодня с 17:00 до 18:00 ваше офисное дежурство. Проверьте чек-лист в приложении «Дежурства».`
+  ? `Напоминание: сегодня с 17:00 до 18:00 ваше офисное дежурство. Откройте «Дежурства» и подтвердите готовность.`
   : `Напоминание: сегодня с 09:00 до 18:00 ваше дежурство поддержки. Проверьте обращения клиентов в Bitrix24.`;
 async function notifyByWebhook(employeeId,message) {
   const base=String(process.env.BITRIX_IM_WEBHOOK||'').replace(/\/$/,'');
@@ -156,6 +157,15 @@ async function api(req,res,url) {
     const r=db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note) VALUES (?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,v.note||'');
     db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${hours} ч · ${v.occurred_on}`); return json(res,201,snapshot(actor));
+  }
+  const officeAction=url.pathname.match(/^\/api\/duties\/(\d+)\/office\/(acknowledge|decline|complete)$/);
+  if(req.method==='POST' && officeAction){
+    const actor=await b24User(req); if(!actor) return json(res,401,{error:'Не удалось определить пользователя Bitrix24'});
+    const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(officeAction[1])); if(!duty||duty.kind!=='office') return json(res,404,{error:'Офисное дежурство не найдено'});
+    const action=officeAction[2], actorName=`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim();
+    if(action==='acknowledge'){if(Number(actor.ID)!==duty.employee_id||duty.office_status!=='scheduled') return json(res,403,{error:'Подтвердить готовность может назначенный сотрудник'});db.prepare('UPDATE duties SET office_status=? WHERE id=?').run('acknowledged',duty.id);audit(actorName,'Сотрудник подтвердил офисное дежурство',duty.starts_on);return json(res,200,snapshot(actor));}
+    if(action==='decline'){if(Number(actor.ID)!==duty.employee_id||!['scheduled','acknowledged'].includes(duty.office_status)) return json(res,403,{error:'Отказаться может назначенный сотрудник'});const v=await body(req);db.prepare('UPDATE duties SET office_status=? WHERE id=?').run('declined',duty.id);audit(actorName,'Сотрудник не может дежурить в офисе',`${duty.starts_on}${v.note?` · ${v.note}`:''}`);return json(res,200,snapshot(actor));}
+    if(!actor.app_admin||duty.office_status!=='acknowledged') return json(res,403,{error:'Выполнение подтверждает администратор после подтверждения сотрудника'});db.prepare('UPDATE duties SET office_status=? WHERE id=?').run('completed',duty.id);audit(actorName,'Подтверждено выполнение офисного дежурства',duty.starts_on);return json(res,200,snapshot(actor));
   }
   if (req.method==='POST' && url.pathname==='/api/swaps') {
     const actor=await b24User(req); if(!actor) return json(res,401,{error:'Не удалось определить пользователя Bitrix24'});
