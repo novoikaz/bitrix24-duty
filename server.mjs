@@ -174,7 +174,7 @@ async function api(req,res,url) {
   if (req.method==='POST' && url.pathname==='/api/swaps') {
     const actor=await b24User(req); if(!actor) return json(res,401,{error:'Не удалось определить пользователя Bitrix24'});
     const v=await body(req), currentId=Number(actor.ID), dutyId=Number(v.duty_id), targetId=Number(v.to_employee_id);
-    const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(dutyId); if(!duty||duty.status!=='scheduled') return json(res,422,{error:'Можно предложить обмен только для назначенного дежурства'});
+    const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(dutyId); if(!duty||!['scheduled','confirmed'].includes(duty.status)) return json(res,422,{error:'Для этого дежурства обмен уже недоступен'});
     if(duty.employee_id!==currentId) return json(res,403,{error:'Можно предложить обмен только своего дежурства'});
     if(!targetId||targetId===currentId||!db.prepare('SELECT 1 FROM employees WHERE id=?').get(targetId)) return json(res,422,{error:'Выберите другого сотрудника'});
     if(db.prepare("SELECT 1 FROM swap_requests WHERE duty_id=? AND status IN ('pending_target','pending_admin')").get(dutyId)) return json(res,409,{error:'По этому дежурству уже есть активная заявка на обмен'});
@@ -189,7 +189,15 @@ async function api(req,res,url) {
     if(action==='accept') { if(actorId!==request.to_employee_id||request.status!=='pending_target') return json(res,403,{error:'Эта заявка недоступна для подтверждения'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('pending_admin',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Сотрудник согласился на обмен', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
     if(action==='reject') { if(actorId!==request.to_employee_id&&!actor.app_admin) return json(res,403,{error:'Отклонить заявку может получатель или администратор'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('rejected',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Отклонён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
     if(!actor.app_admin||request.status!=='pending_admin') return json(res,403,{error:'Подтверждать обмен может только администратор после согласия сотрудника'});
-    db.prepare('UPDATE duties SET employee_id=? WHERE id=?').run(request.to_employee_id,request.duty_id); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('approved',request.id);
+    // Если смена уже подтверждена как компенсирующая, переносим её учёт с прежнего сотрудника на нового.
+    const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(request.duty_id);
+    db.prepare('DELETE FROM ledger WHERE reference_id=? AND kind=?').run(duty.id,'support');
+    db.prepare('UPDATE duties SET employee_id=? WHERE id=?').run(request.to_employee_id,request.duty_id);
+    if(duty.status==='confirmed'&&duty.accounting_mode==='compensate'){
+      const credited=Math.min(duty.hours,Math.max(0,-balance(request.to_employee_id)));
+      if(credited) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(request.to_employee_id,duty.ends_on,credited,'support',duty.id,'Компенсирующее дежурство после обмена');
+    }
+    db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('approved',request.id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor));
   }
   const remindMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/remind$/);
