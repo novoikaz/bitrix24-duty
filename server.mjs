@@ -204,7 +204,8 @@ async function api(req,res,url) {
     const memberId=raw.member_id||raw['auth[member_id]']; const domain=raw.DOMAIN||raw.domain||raw['auth[domain]'];
     const accessToken=raw.AUTH_ID||raw['auth[access_token]']; const refreshToken=raw.REFRESH_ID||raw['auth[refresh_token]']; const expires=raw.AUTH_EXPIRES||raw['auth[expires_in]'];
     if(memberId && domain) db.prepare('INSERT OR REPLACE INTO portals(member_id,domain,access_token,refresh_token,expires_at) VALUES (?,?,?,?,?)').run(memberId,domain,accessToken||null,refreshToken||null,Date.now()+Number(expires||0)*1000);
-    res.writeHead(302,{location:'/'}); return res.end();
+    const installPage=await readFile(join(process.cwd(),'public','install.html'));
+    res.writeHead(200,{'content-type':'text/html; charset=utf-8'}); return res.end(installPage);
   }
   return json(res,404,{error:'Не найдено'});
 }
