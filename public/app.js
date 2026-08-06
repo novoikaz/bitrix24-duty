@@ -18,7 +18,7 @@ function person(duty){return duty?`<div class="person">${ava(duty)}<div><b>${esc
 function addCalendarToolbar(){
   if($('#monthTitle'))return;
   const style=document.createElement('style');
-  style.textContent=`.calendarbar{display:flex;align-items:center;justify-content:space-between;margin:18px 0 10px}.calendarbar h2{margin:0;font-size:17px}.calnav{display:flex;gap:7px}.day.empty{background:#fcfdff}.day.current-week{background:#f4f7ff;box-shadow:inset 0 2px #b8cbef,inset 0 -2px #b8cbef}.delete{margin-left:auto;border:0;background:transparent;color:inherit;padding:0 2px;font-size:16px;line-height:1}.event.admin-event{cursor:pointer}.ops{align-items:stretch}.ops .card{height:282px;overflow:hidden}.ops #audit{height:215px;overflow-y:auto;padding-right:7px}.ops #audit::-webkit-scrollbar{width:6px}.ops #audit::-webkit-scrollbar-thumb{background:#d5dceb;border-radius:8px}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{text-align:left;border-bottom:1px solid #e7ecf4;padding:9px;font-size:13px}`;
+  style.textContent=`.calendarbar{display:flex;align-items:center;justify-content:space-between;margin:18px 0 10px}.calendarbar h2{margin:0;font-size:17px}.calnav{display:flex;gap:7px}.day.empty{background:#fcfdff}.day.current-week{background:#f4f7ff;box-shadow:inset 0 2px #b8cbef,inset 0 -2px #b8cbef}.delete{margin-left:auto;border:0;background:transparent;color:inherit;padding:0 2px;font-size:16px;line-height:1}.event.admin-event{cursor:pointer}.ops{grid-template-columns:repeat(3,1fr);align-items:stretch}.ops .card{height:282px;overflow:hidden}.ops #audit{height:215px;overflow-y:auto;padding-right:7px}.ops #audit::-webkit-scrollbar{width:6px}.ops #audit::-webkit-scrollbar-thumb{background:#d5dceb;border-radius:8px}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{text-align:left;border-bottom:1px solid #e7ecf4;padding:9px;font-size:13px}`;
   document.head.append(style);
   $('#notice').remove();
   const bar=document.createElement('section');
@@ -39,7 +39,7 @@ function render(){
   const weekEnd=new Date(weekStart);weekEnd.setDate(weekStart.getDate()+6);
   const weekStartKey=dateKey(weekStart),weekEndKey=dateKey(weekEnd);
   const isCurrentMonth=viewDate.getFullYear()===now.getFullYear()&&viewDate.getMonth()===now.getMonth();
-  const weekDuties=state.duties.filter(duty=>duty.starts_on<=weekEndKey&&duty.ends_on>=weekStartKey);
+  const weekDuties=state.duties.filter(duty=>duty.starts_on<=weekEndKey&&duty.ends_on>=dateKey(now));
   const office=weekDuties.find(duty=>duty.kind==='office');
   const support=weekDuties.find(duty=>duty.kind==='support'||duty.kind==='holiday');
   const daysOfWeek=['ПН','ВТ','СР','ЧТ','ПТ','СБ','ВС'];
