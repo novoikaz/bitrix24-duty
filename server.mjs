@@ -20,6 +20,8 @@ db.exec(`
 `);
 if (!db.prepare('PRAGMA table_info(duties)').all().some(column=>column.name==='accounting_mode')) db.exec("ALTER TABLE duties ADD COLUMN accounting_mode TEXT NOT NULL DEFAULT 'schedule'");
 if (!db.prepare('PRAGMA table_info(duties)').all().some(column=>column.name==='office_status')) db.exec("ALTER TABLE duties ADD COLUMN office_status TEXT NOT NULL DEFAULT 'scheduled'");
+if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='absence_type')) db.exec("ALTER TABLE absences ADD COLUMN absence_type TEXT NOT NULL DEFAULT 'personal'");
+if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='compensable')) db.exec('ALTER TABLE absences ADD COLUMN compensable INTEGER NOT NULL DEFAULT 1');
 
 if (!db.prepare('SELECT count(*) AS n FROM employees').get().n) {
   const add = db.prepare('INSERT INTO employees (id,name,avatar,is_admin) VALUES (?,?,?,?)');
@@ -153,10 +155,12 @@ async function api(req,res,url) {
   }
   if (req.method==='POST' && url.pathname==='/api/absences') {
     const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Вносить отсутствие может только администратор портала'});
-    const v=await body(req); const hours=Number(v.hours); if(!Number(v.employee_id)||!v.occurred_on||!hours||hours>24) return json(res,422,{error:'Проверьте данные отсутствия'});
-    const r=db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note) VALUES (?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,v.note||'');
-    db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${hours} ч · ${v.occurred_on}`); return json(res,201,snapshot(actor));
+    const v=await body(req); const hours=Number(v.hours), absenceType=String(v.absence_type||'personal');
+    if(!Number(v.employee_id)||!v.occurred_on||!hours||hours>720||!['vacation','sick_leave','time_off','business_trip','personal','other'].includes(absenceType)) return json(res,422,{error:'Проверьте данные отсутствия'});
+    const compensable=v.compensable===true||v.compensable==='true'||v.compensable==='on';
+    const r=db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note,absence_type,compensable) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,v.note||'',absenceType,compensable?1:0);
+    if(compensable) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${absenceType} · ${hours} ч · ${v.occurred_on}${compensable?' · учтено в отработке':''}`); return json(res,201,snapshot(actor));
   }
   const officeAction=url.pathname.match(/^\/api\/duties\/(\d+)\/office\/(acknowledge|decline|complete)$/);
   if(req.method==='POST' && officeAction){
