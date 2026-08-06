@@ -61,9 +61,11 @@ const dutyMessage = duty => duty.kind==='office'
   : `Напоминание: сегодня с 09:00 до 18:00 ваше дежурство поддержки. Проверьте обращения клиентов в Bitrix24.`;
 async function notifyByWebhook(employeeId,message) {
   const base=String(process.env.BITRIX_IM_WEBHOOK||'').replace(/\/$/,'');
-  if(!base) throw new Error('Не задан BITRIX_IM_WEBHOOK для отправки уведомлений');
-  const response=await fetch(`${base}/im.notify.json`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({TO_USER_ID:String(employeeId),MESSAGE:message})});
-  const data=await response.json(); if(!response.ok||data.error) throw new Error(data.error_description||data.error||'Bitrix24 не принял уведомление');
+  if(!base) throw new Error('В Render не задан BITRIX_IM_WEBHOOK для отправки уведомлений');
+  const response=await fetch(`${base}/im.notify.personal.add`,{method:'POST',headers:{'content-type':'application/json','accept':'application/json'},body:JSON.stringify({USER_ID:Number(employeeId),MESSAGE:message})});
+  const raw=await response.text(); let data;
+  try{data=JSON.parse(raw)}catch{throw new Error(`Bitrix24 вернул не ответ API (HTTP ${response.status}). Проверьте URL вебхука в Render и право «Чат и уведомления».`)}
+  if(!response.ok||data.error) throw new Error(data.error_description||data.error||'Bitrix24 не принял уведомление');
 }
 function almatyNow(){const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Almaty',year:'numeric',month:'2-digit',day:'2-digit',weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});const values=Object.fromEntries(formatter.formatToParts(new Date()).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));return {date:`${values.year}-${values.month}-${values.day}`,weekday:values.weekday,hour:Number(values.hour),minute:Number(values.minute)};}
 async function sendDueReminders(kind,now=almatyNow()){
