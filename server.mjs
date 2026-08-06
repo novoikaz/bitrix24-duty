@@ -13,6 +13,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS absences (id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, occurred_on TEXT NOT NULL, hours INTEGER NOT NULL CHECK(hours > 0), note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(employee_id) REFERENCES employees(id));
   CREATE TABLE IF NOT EXISTS ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, occurred_on TEXT NOT NULL, hours INTEGER NOT NULL, kind TEXT NOT NULL, reference_id INTEGER, note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(employee_id) REFERENCES employees(id));
   CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, actor TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS swap_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, duty_id INTEGER NOT NULL, from_employee_id INTEGER NOT NULL, to_employee_id INTEGER NOT NULL, note TEXT, status TEXT NOT NULL DEFAULT 'pending_target', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(duty_id) REFERENCES duties(id), FOREIGN KEY(from_employee_id) REFERENCES employees(id), FOREIGN KEY(to_employee_id) REFERENCES employees(id));
   CREATE TABLE IF NOT EXISTS portals (member_id TEXT PRIMARY KEY, domain TEXT NOT NULL, access_token TEXT, refresh_token TEXT, expires_at INTEGER);
   CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `);
@@ -51,6 +52,7 @@ function snapshot(user=null) {
     absences: db.prepare(`SELECT a.*, e.name FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
     balances: db.prepare('SELECT id,name,avatar FROM employees').all().map(e=>({...e, hours:balance(e.id)})),
     audit: db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 15').all(),
+    swapRequests: db.prepare(`SELECT s.*, d.kind, d.starts_on, d.ends_on, d.hours, f.name AS from_name, t.name AS to_name FROM swap_requests s JOIN duties d ON d.id=s.duty_id JOIN employees f ON f.id=s.from_employee_id JOIN employees t ON t.id=s.to_employee_id WHERE s.status NOT IN ('rejected','cancelled') ORDER BY s.id DESC`).all(),
     permissions: { canEdit: Boolean(user?.app_admin) },
     currentEmployeeId: user ? Number(user.ID) : null
   };
@@ -122,6 +124,28 @@ async function api(req,res,url) {
     const r=db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note) VALUES (?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,v.note||'');
     db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${hours} ч · ${v.occurred_on}`); return json(res,201,snapshot(actor));
+  }
+  if (req.method==='POST' && url.pathname==='/api/swaps') {
+    const actor=await b24User(req); if(!actor) return json(res,401,{error:'Не удалось определить пользователя Bitrix24'});
+    const v=await body(req), currentId=Number(actor.ID), dutyId=Number(v.duty_id), targetId=Number(v.to_employee_id);
+    const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(dutyId); if(!duty||duty.status!=='scheduled') return json(res,422,{error:'Можно предложить обмен только для назначенного дежурства'});
+    if(duty.employee_id!==currentId) return json(res,403,{error:'Можно предложить обмен только своего дежурства'});
+    if(!targetId||targetId===currentId||!db.prepare('SELECT 1 FROM employees WHERE id=?').get(targetId)) return json(res,422,{error:'Выберите другого сотрудника'});
+    if(db.prepare("SELECT 1 FROM swap_requests WHERE duty_id=? AND status IN ('pending_target','pending_admin')").get(dutyId)) return json(res,409,{error:'По этому дежурству уже есть активная заявка на обмен'});
+    db.prepare('INSERT INTO swap_requests(duty_id,from_employee_id,to_employee_id,note) VALUES (?,?,?,?)').run(dutyId,currentId,targetId,String(v.note||''));
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Предложен обмен дежурством', `${duty.starts_on}–${duty.ends_on}`); return json(res,201,snapshot(actor));
+  }
+  const swapAction=url.pathname.match(/^\/api\/swaps\/(\d+)\/(accept|reject|approve)$/);
+  if (req.method==='POST' && swapAction) {
+    const actor=await b24User(req); if(!actor) return json(res,401,{error:'Не удалось определить пользователя Bitrix24'});
+    const request=db.prepare('SELECT s.*,d.hours,d.kind,d.starts_on,d.ends_on FROM swap_requests s JOIN duties d ON d.id=s.duty_id WHERE s.id=?').get(Number(swapAction[1]));
+    if(!request) return json(res,404,{error:'Заявка на обмен не найдена'}); const action=swapAction[2], actorId=Number(actor.ID);
+    if(action==='accept') { if(actorId!==request.to_employee_id||request.status!=='pending_target') return json(res,403,{error:'Эта заявка недоступна для подтверждения'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('pending_admin',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Сотрудник согласился на обмен', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
+    if(action==='reject') { if(actorId!==request.to_employee_id&&!actor.app_admin) return json(res,403,{error:'Отклонить заявку может получатель или администратор'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('rejected',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Отклонён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
+    if(!actor.app_admin||request.status!=='pending_admin') return json(res,403,{error:'Подтверждать обмен может только администратор после согласия сотрудника'});
+    if(request.kind!=='office'&&balance(request.to_employee_id)<request.hours) return json(res,422,{error:`У выбранного сотрудника недостаточно часов для списания (${request.hours} ч)`});
+    db.prepare('UPDATE duties SET employee_id=? WHERE id=?').run(request.to_employee_id,request.duty_id); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('approved',request.id);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor));
   }
   if (req.method==='POST' && url.pathname==='/install') {
     // Bitrix24 local-app handler: persist tokens per portal. Encrypt these columns with KMS in production.

@@ -32,3 +32,27 @@
   function bind(){if(window.BX24){const auth=BX24.getAuth?.();if(auth)headers={'x-b24-token':auth.access_token,'x-b24-domain':auth.domain}}const nav=[...document.querySelectorAll('.nav span')];if(nav.length<4)return;nav[1].onclick=()=>balance().catch(error=>alert(error.message));nav[2].onclick=()=>employees().catch(error=>alert(error.message));nav[3].onclick=()=>settings().catch(error=>alert(error.message))}
   if(window.BX24)BX24.init(bind);else window.addEventListener('load',bind);
 })();
+
+/* Личный кабинет обменов: отдельный слой, не вмешивается в загрузку календаря. */
+(()=>{
+  let headers={};
+  const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+  async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{...headers,...(body?{'content-type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});const data=await response.json();if(!response.ok)throw new Error(data.error||'Не удалось выполнить действие');return data}
+  function show(data){
+    const me=data.employees.find(item=>item.id===data.currentEmployeeId);if(!me)return;
+    const balance=data.balances.find(item=>item.id===me.id)?.hours||0;
+    const mine=data.duties.filter(item=>item.employee_id===me.id&&item.status==='scheduled');
+    const incoming=data.swapRequests.filter(item=>item.to_employee_id===me.id&&item.status==='pending_target');
+    const admin=data.permissions.canEdit?data.swapRequests.filter(item=>item.status==='pending_admin'):[];
+    const people=data.employees.filter(item=>item.id!==me.id).map(item=>`<option value="${item.id}">${esc(item.name)}</option>`).join('');
+    document.querySelector('.main').innerHTML=`<div class="report-page"><header class="top"><div><div class="eyebrow">novoi.bitrix24.kz</div><h1>Мой баланс и обмены</h1><div class="sub">Баланс: <b>${balance} ч</b> к компенсации</div></div></header><section class="report-card"><h2>Предложить замену</h2><p class="muted">Выберите своё назначенное дежурство и сотрудника. Он должен согласиться, после чего администратор подтверждает обмен.</p>${mine.length?mine.map(duty=>`<form class="swap-form" data-duty="${duty.id}" style="display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:10px;align-items:end;margin-top:12px"><div><b>${duty.kind==='office'?'Офис':'Поддержка'} · ${duty.starts_on} — ${duty.ends_on}</b><div class="muted">${duty.hours} ч</div></div><select name="to_employee_id">${people}</select><button>Предложить обмен</button><input style="grid-column:1/-1" name="note" placeholder="Комментарий для сотрудника (необязательно)"></form>`).join(''):'<div class="empty-note">У вас нет назначенных дежурств, которые можно обменять.</div>'}</section><section class="report-card"><h2>Мне предложили обмен</h2>${incoming.length?`<table class="report-table"><tr><th>От кого</th><th>Период</th><th>Часы</th><th></th></tr>${incoming.map(item=>`<tr><td>${esc(item.from_name)}</td><td>${item.starts_on} — ${item.ends_on}</td><td>${item.hours} ч</td><td><button data-accept="${item.id}">Согласиться</button> <button class="danger" data-reject-swap="${item.id}">Отклонить</button></td></tr>`).join('')}</table>`:'<div class="empty-note">Новых предложений нет.</div>'}</section>${data.permissions.canEdit?`<section class="report-card"><h2>Обмены на подтверждении</h2>${admin.length?`<table class="report-table"><tr><th>Кто меняется</th><th>Период</th><th></th></tr>${admin.map(item=>`<tr><td>${esc(item.from_name)} → ${esc(item.to_name)}</td><td>${item.starts_on} — ${item.ends_on} · ${item.hours} ч</td><td><button class="primary" data-approve="${item.id}">Подтвердить обмен</button> <button class="danger" data-reject-swap="${item.id}">Отклонить</button></td></tr>`).join('')}</table>`:'<div class="empty-note">Нет обменов, ожидающих решения администратора.</div>'}</section>`:''}<p><button onclick="location.reload()">← К календарю</button></p></div>`;
+    document.querySelectorAll('.swap-form').forEach(form=>form.onsubmit=async event=>{event.preventDefault();try{await api('/api/swaps','POST',{duty_id:form.dataset.duty,...Object.fromEntries(new FormData(form))});alert('Предложение отправлено сотруднику.');open()}catch(error){alert(error.message)}});
+    document.querySelectorAll('[data-accept]').forEach(button=>button.onclick=()=>action(button.dataset.accept,'accept'));
+    document.querySelectorAll('[data-approve]').forEach(button=>button.onclick=()=>action(button.dataset.approve,'approve'));
+    document.querySelectorAll('[data-reject-swap]').forEach(button=>button.onclick=()=>action(button.dataset.rejectSwap,'reject'));
+  }
+  async function action(id,verb){if(verb==='reject'&&!confirm('Отклонить обмен?'))return;try{await api(`/api/swaps/${id}/${verb}`,'POST');alert(verb==='approve'?'Обмен подтверждён.':'Решение сохранено.');open()}catch(error){alert(error.message)}}
+  async function open(){try{show(await api('/api/bootstrap'))}catch(error){alert(error.message)}}
+  function bind(){if(window.BX24){const auth=BX24.getAuth?.();if(auth)headers={'x-b24-token':auth.access_token,'x-b24-domain':auth.domain}}const nav=[...document.querySelectorAll('.nav span')];if(nav[1])nav[1].onclick=open}
+  if(window.BX24)BX24.init(bind);else window.addEventListener('load',bind);
+})();
