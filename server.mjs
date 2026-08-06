@@ -14,6 +14,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, occurred_on TEXT NOT NULL, hours INTEGER NOT NULL, kind TEXT NOT NULL, reference_id INTEGER, note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(employee_id) REFERENCES employees(id));
   CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, actor TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS swap_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, duty_id INTEGER NOT NULL, from_employee_id INTEGER NOT NULL, to_employee_id INTEGER NOT NULL, note TEXT, status TEXT NOT NULL DEFAULT 'pending_target', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(duty_id) REFERENCES duties(id), FOREIGN KEY(from_employee_id) REFERENCES employees(id), FOREIGN KEY(to_employee_id) REFERENCES employees(id));
+  CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, duty_id INTEGER NOT NULL, type TEXT NOT NULL, sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(duty_id,type), FOREIGN KEY(duty_id) REFERENCES duties(id));
   CREATE TABLE IF NOT EXISTS portals (member_id TEXT PRIMARY KEY, domain TEXT NOT NULL, access_token TEXT, refresh_token TEXT, expires_at INTEGER);
   CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `);
@@ -45,6 +46,16 @@ async function b24User(req) {
 const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || (await b24User(req))?.IS_ADMIN === 'Y');
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
 const balance = id => db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?').get(id).hours;
+const dutyMessage = duty => duty.kind==='office'
+  ? `Напоминание: сегодня с 17:00 до 18:00 ваше офисное дежурство. Проверьте чек-лист в приложении «Дежурства».`
+  : `Напоминание: сегодня с 09:00 до 18:00 ваше дежурство поддержки. Проверьте обращения клиентов в Bitrix24.`;
+async function notifyByWebhook(employeeId,message) {
+  const base=String(process.env.BITRIX_IM_WEBHOOK||'').replace(/\/$/,'');
+  if(!base) throw new Error('Не задан BITRIX_IM_WEBHOOK для отправки уведомлений');
+  const response=await fetch(`${base}/im.notify.json`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({TO_USER_ID:String(employeeId),MESSAGE:message})});
+  const data=await response.json(); if(!response.ok||data.error) throw new Error(data.error_description||data.error||'Bitrix24 не принял уведомление');
+}
+function almatyNow(){const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Almaty',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});const values=Object.fromEntries(formatter.formatToParts(new Date()).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));return {date:`${values.year}-${values.month}-${values.day}`,hour:Number(values.hour),minute:Number(values.minute)};}
 function snapshot(user=null) {
   return {
     employees: db.prepare('SELECT * FROM employees ORDER BY name').all(),
@@ -146,6 +157,21 @@ async function api(req,res,url) {
     if(request.kind!=='office'&&balance(request.to_employee_id)<request.hours) return json(res,422,{error:`У выбранного сотрудника недостаточно часов для списания (${request.hours} ч)`});
     db.prepare('UPDATE duties SET employee_id=? WHERE id=?').run(request.to_employee_id,request.duty_id); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('approved',request.id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor));
+  }
+  const remindMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/remind$/);
+  if(req.method==='POST' && remindMatch) {
+    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Отправлять напоминания может только администратор портала'});
+    const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(remindMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
+    await notifyByWebhook(duty.employee_id,dutyMessage(duty)); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Отправлено напоминание', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,{ok:true});
+  }
+  if(req.method==='POST' && url.pathname==='/api/reminders/run') {
+    if(!process.env.CRON_SECRET||req.headers['x-cron-secret']!==process.env.CRON_SECRET) return json(res,401,{error:'Нет доступа к запуску напоминаний'});
+    const now=almatyNow(), type=url.searchParams.get('type');
+    const kind=type==='office'?'office':'support', scheduledHour=kind==='office'?14:6;
+    if(now.hour!==scheduledHour||now.minute>5) return json(res,200,{ok:true,sent:0,message:'Не время для отправки'});
+    const duties=db.prepare("SELECT * FROM duties WHERE starts_on=? AND status='scheduled' AND (kind=? OR (?='support' AND kind='holiday'))").all(now.date,kind,kind); let sent=0;
+    for(const duty of duties){if(db.prepare('SELECT 1 FROM notifications WHERE duty_id=? AND type=?').get(duty.id,'three_hours'))continue;await notifyByWebhook(duty.employee_id,dutyMessage(duty));db.prepare('INSERT INTO notifications(duty_id,type) VALUES (?,?)').run(duty.id,'three_hours');sent++;}
+    audit('Автоматическое напоминание','Отправлены напоминания',`${kind}: ${sent}`); return json(res,200,{ok:true,sent});
   }
   if (req.method==='POST' && url.pathname==='/install') {
     // Bitrix24 local-app handler: persist tokens per portal. Encrypt these columns with KMS in production.
