@@ -38,6 +38,9 @@
   if(window.BX24)BX24.init(bind);else window.addEventListener('load',bind);
 })();
 
+/* Компактный список команды в личном кабинете. */
+(()=>{const style=document.createElement('style');style.textContent='.team-compact{max-height:220px!important;overflow-y:auto!important;padding-right:8px!important}.team-compact::-webkit-scrollbar{width:6px}.team-compact::-webkit-scrollbar-thumb{background:#d5ddeb;border-radius:8px}.team-row{grid-template-columns:minmax(150px,1fr) 55px minmax(90px,140px) 80px!important}.team-row b,.team-row .sub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}@media(max-width:760px){.team-row{grid-template-columns:1fr 55px 70px!important}.team-row .sub{display:none}}';document.head.append(style)})();
+
 /* Визуальное оформление карточек обмена. */
 (()=>{
   const style=document.createElement('style');
