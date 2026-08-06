@@ -8,7 +8,7 @@ const port = Number(process.env.PORT || 3000);
 const db = new DatabaseSync(process.env.DATABASE_PATH || './duty.sqlite');
 db.exec(`
   PRAGMA foreign_keys = ON;
-  CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY, name TEXT NOT NULL, avatar TEXT, is_admin INTEGER NOT NULL DEFAULT 0);
+  CREATE TABLE IF NOT EXISTS employees (id INTEGER PRIMARY KEY, name TEXT NOT NULL, avatar TEXT, is_admin INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1, is_eligible INTEGER NOT NULL DEFAULT 1);
   CREATE TABLE IF NOT EXISTS duties (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL CHECK(kind IN ('office','support','holiday')), starts_on TEXT NOT NULL, ends_on TEXT NOT NULL, employee_id INTEGER NOT NULL, hours INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'scheduled', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(employee_id) REFERENCES employees(id));
   CREATE TABLE IF NOT EXISTS absences (id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, occurred_on TEXT NOT NULL, hours INTEGER NOT NULL CHECK(hours > 0), note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(employee_id) REFERENCES employees(id));
   CREATE TABLE IF NOT EXISTS ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL, occurred_on TEXT NOT NULL, hours INTEGER NOT NULL, kind TEXT NOT NULL, reference_id INTEGER, note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(employee_id) REFERENCES employees(id));
@@ -22,6 +22,8 @@ if (!db.prepare('PRAGMA table_info(duties)').all().some(column=>column.name==='a
 if (!db.prepare('PRAGMA table_info(duties)').all().some(column=>column.name==='office_status')) db.exec("ALTER TABLE duties ADD COLUMN office_status TEXT NOT NULL DEFAULT 'scheduled'");
 if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='absence_type')) db.exec("ALTER TABLE absences ADD COLUMN absence_type TEXT NOT NULL DEFAULT 'personal'");
 if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='compensable')) db.exec('ALTER TABLE absences ADD COLUMN compensable INTEGER NOT NULL DEFAULT 1');
+if (!db.prepare('PRAGMA table_info(employees)').all().some(column=>column.name==='is_active')) db.exec('ALTER TABLE employees ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1');
+if (!db.prepare('PRAGMA table_info(employees)').all().some(column=>column.name==='is_eligible')) db.exec('ALTER TABLE employees ADD COLUMN is_eligible INTEGER NOT NULL DEFAULT 1');
 
 if (!db.prepare('SELECT count(*) AS n FROM employees').get().n) {
   const add = db.prepare('INSERT INTO employees (id,name,avatar,is_admin) VALUES (?,?,?,?)');
@@ -81,10 +83,10 @@ async function sendDueReminders(kind,now=almatyNow()){
 async function reminderTick(){try{const now=almatyNow();if(now.weekday==='Fri')await sendDueReminders('office',now);if(now.weekday==='Sat')await sendDueReminders('support',now)}catch(error){console.error('Reminder error:',error.message)}}
 function snapshot(user=null) {
   return {
-    employees: db.prepare('SELECT * FROM employees ORDER BY name').all(),
+    employees: db.prepare('SELECT * FROM employees WHERE is_active=1 AND is_eligible=1 ORDER BY name').all(),
     duties: db.prepare(`SELECT d.*, e.name, e.avatar FROM duties d JOIN employees e ON e.id=d.employee_id WHERE d.status NOT IN ('cancelled','rejected') ORDER BY d.starts_on`).all(),
     absences: db.prepare(`SELECT a.*, e.name FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
-    balances: db.prepare('SELECT id,name,avatar FROM employees').all().map(e=>({...e, hours:balance(e.id)})),
+    balances: db.prepare('SELECT id,name,avatar FROM employees WHERE is_active=1 AND is_eligible=1').all().map(e=>({...e, hours:balance(e.id)})),
     audit: db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 15').all(),
     swapRequests: db.prepare(`SELECT s.*, d.kind, d.starts_on, d.ends_on, d.hours, f.name AS from_name, t.name AS to_name FROM swap_requests s JOIN duties d ON d.id=s.duty_id JOIN employees f ON f.id=s.from_employee_id JOIN employees t ON t.id=s.to_employee_id WHERE s.status NOT IN ('rejected','cancelled') ORDER BY s.id DESC`).all(),
     permissions: { canEdit: Boolean(user?.app_admin) },
@@ -100,16 +102,25 @@ async function syncEmployees(req) {
     db.exec('DELETE FROM ledger; DELETE FROM absences; DELETE FROM duties; DELETE FROM employees;');
     db.prepare("INSERT INTO meta(key,value) VALUES ('bitrix_synced','1')").run();
   }
-  const save=db.prepare('INSERT INTO employees(id,name,avatar,is_admin) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,avatar=excluded.avatar,is_admin=excluded.is_admin');
+  db.prepare('UPDATE employees SET is_active=0').run();
+  const save=db.prepare('INSERT INTO employees(id,name,avatar,is_admin,is_active) VALUES (?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET name=excluded.name,avatar=excluded.avatar,is_admin=excluded.is_admin,is_active=1');
   for(const e of users.filter(x=>x.ACTIVE!==false && x.ACTIVE!=='N')) save.run(Number(e.ID),`${e.NAME||''} ${e.LAST_NAME||''}`.trim()||e.LOGIN,e.PERSONAL_PHOTO||'',Number(e.ID)===Number(user.ID)&&user.app_admin?1:0);
   return user;
 }
 async function api(req,res,url) {
   if (req.method==='POST' && url.pathname==='/api/bitrix/sync') { const user=await syncEmployees(req); return json(res,200,snapshot(user)); }
   if (req.method==='GET' && url.pathname==='/api/bootstrap') { const user=await b24User(req); return json(res,200,snapshot(user)); }
+  const eligibilityMatch=url.pathname.match(/^\/api\/employees\/(\d+)\/eligibility$/);
+  if(req.method==='PATCH'&&eligibilityMatch){
+    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Менять состав графика может только администратор портала'});
+    const employee=db.prepare('SELECT * FROM employees WHERE id=?').get(Number(eligibilityMatch[1])); if(!employee) return json(res,404,{error:'Сотрудник не найден'});
+    const v=await body(req), eligible=v.eligible===true||v.eligible==='true'||v.eligible==='on';
+    db.prepare('UPDATE employees SET is_eligible=? WHERE id=?').run(eligible?1:0,employee.id);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Изменён состав графика',`${employee.name}: ${eligible?'участвует':'исключён'}`); return json(res,200,snapshot(actor));
+  }
   if (req.method==='POST' && url.pathname==='/api/duties') {
     const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Изменять график может только администратор портала'});
-    const v=await body(req); if(!['office','support','holiday'].includes(v.kind)||!v.starts_on||!v.ends_on||!Number(v.employee_id)||!['schedule','compensate'].includes(v.accounting_mode||'schedule')) return json(res,422,{error:'Заполните тип, сотрудника, даты и режим'});
+    const v=await body(req); if(!['office','support','holiday'].includes(v.kind)||!v.starts_on||!v.ends_on||!Number(v.employee_id)||!['schedule','compensate'].includes(v.accounting_mode||'schedule')||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(Number(v.employee_id))) return json(res,422,{error:'Выберите действующего сотрудника из состава графика'});
     const accountingMode=v.kind==='office'?'schedule':(v.accounting_mode||'schedule');
     const defaultHours=v.kind==='office'?0:(v.kind==='holiday'||v.starts_on===v.ends_on?2:4);
     const hours=v.kind==='office'?0:(v.hours===undefined||v.hours===''?defaultHours:Number(v.hours));
@@ -156,7 +167,7 @@ async function api(req,res,url) {
   if (req.method==='POST' && url.pathname==='/api/absences') {
     const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Вносить отсутствие может только администратор портала'});
     const v=await body(req); const hours=Number(v.hours), absenceType=String(v.absence_type||'personal');
-    if(!Number(v.employee_id)||!v.occurred_on||!hours||hours>720||!['vacation','sick_leave','time_off','business_trip','personal','other'].includes(absenceType)) return json(res,422,{error:'Проверьте данные отсутствия'});
+    if(!Number(v.employee_id)||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(Number(v.employee_id))||!v.occurred_on||!hours||hours>720||!['vacation','sick_leave','time_off','business_trip','personal','other'].includes(absenceType)) return json(res,422,{error:'Выберите действующего сотрудника и проверьте данные отсутствия'});
     const compensable=v.compensable===true||v.compensable==='true'||v.compensable==='on';
     const r=db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note,absence_type,compensable) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,v.note||'',absenceType,compensable?1:0);
     if(compensable) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
@@ -176,7 +187,7 @@ async function api(req,res,url) {
     const v=await body(req), currentId=Number(actor.ID), dutyId=Number(v.duty_id), targetId=Number(v.to_employee_id);
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(dutyId); if(!duty||!['scheduled','confirmed'].includes(duty.status)) return json(res,422,{error:'Для этого дежурства обмен уже недоступен'});
     if(duty.employee_id!==currentId) return json(res,403,{error:'Можно предложить обмен только своего дежурства'});
-    if(!targetId||targetId===currentId||!db.prepare('SELECT 1 FROM employees WHERE id=?').get(targetId)) return json(res,422,{error:'Выберите другого сотрудника'});
+    if(!targetId||targetId===currentId||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(targetId)) return json(res,422,{error:'Выберите действующего сотрудника из состава графика'});
     if(db.prepare("SELECT 1 FROM swap_requests WHERE duty_id=? AND status IN ('pending_target','pending_admin')").get(dutyId)) return json(res,409,{error:'По этому дежурству уже есть активная заявка на обмен'});
     db.prepare('INSERT INTO swap_requests(duty_id,from_employee_id,to_employee_id,note) VALUES (?,?,?,?)').run(dutyId,currentId,targetId,String(v.note||''));
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Предложен обмен дежурством', `${duty.starts_on}–${duty.ends_on}`); return json(res,201,snapshot(actor));

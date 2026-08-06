@@ -74,21 +74,34 @@ function render(){
   $('#audit').innerHTML=state.audit.length?state.audit.map(item=>`<div class="line"><strong>${esc(item.action)}</strong>${esc(item.detail)}<br>${item.occurred_at}</div>`).join(''):'Пока нет изменений';
   const admin=state.permissions.canEdit;$('#mode').textContent=admin?'Администратор портала':'Режим просмотра';
   document.querySelectorAll('.admin').forEach(item=>item.style.display=admin?'inline-block':'none');
-  $('#employee').innerHTML=state.employees.map(item=>`<option value="${item.id}">${esc(item.name)}</option>`).join('');
+  const employeeOptions=state.employees.map(item=>`<option value="${item.id}">${esc(item.name)}</option>`).join('');
+  $('#employee').innerHTML=employeeOptions;
+  $('#absenceEmployee').innerHTML=employeeOptions;
 }
 
 function toast(text){$('#toast').textContent=text;$('#toast').classList.add('on');setTimeout(()=>$('#toast').classList.remove('on'),2600)}
-$('#newDuty').onclick=()=>{$('[name=starts_on]').value=dateKey(viewDate);$('[name=ends_on]').value=dateKey(viewDate);$('#modal').classList.add('open')};
+let addMode='duty';
+function setAddMode(mode){
+  addMode=mode;
+  const duty=mode==='duty', dutyPanel=$('#dutyFields'), absencePanel=$('#absenceFields');
+  dutyPanel.hidden=!duty; absencePanel.hidden=duty;
+  dutyPanel.querySelectorAll('input,select,textarea').forEach(control=>control.disabled=!duty);
+  absencePanel.querySelectorAll('input,select,textarea').forEach(control=>control.disabled=duty);
+  dutyPanel.querySelector('[name=starts_on]').required=duty;
+  dutyPanel.querySelector('[name=ends_on]').required=duty;
+  absencePanel.querySelector('[name=occurred_on]').required=!duty;
+  absencePanel.querySelector('[name=hours]').required=!duty;
+  document.querySelectorAll('[data-add-mode]').forEach(button=>button.classList.toggle('on',button.dataset.addMode===mode));
+  $('#addTitle').textContent=duty?'Добавить дежурство':'Добавить отсутствие';
+  $('#addIntro').textContent=duty?'Назначьте сотрудника в график. Режим «Списать долг» применяется после подтверждения выполнения.':'Зафиксируйте отсутствие: при включённом учёте часы попадут в долг по дежурствам.';
+  $('#addSubmit').textContent=duty?'Добавить дежурство':'Сохранить отсутствие';
+}
+$('#newDuty').onclick=()=>{const value=dateKey(viewDate);$('#dutyFields [name=starts_on]').value=value;$('#dutyFields [name=ends_on]').value=value;$('#absenceFields [name=occurred_on]').value=value;setAddMode('duty');$('#modal').classList.add('open')};
 $('#close').onclick=()=>$('#modal').classList.remove('open');
-const dutyHoursField=document.createElement('div');
-dutyHoursField.className='field';
-dutyHoursField.innerHTML='<label>Часы дежурства / максимум компенсации</label><input name="hours" type="number" min="0.5" max="24" step="0.5" placeholder="Автоматически: 2 или 4">';
-$('#form .actions').before(dutyHoursField);
-const dutyModeField=document.createElement('div');
-dutyModeField.className='field';
-dutyModeField.innerHTML='<label>Режим дежурства</label><select name="accounting_mode"><option value="schedule">По графику — баланс не меняется</option><option value="compensate">Списать отсутствие после подтверждения</option></select>';
-$('#form .actions').before(dutyModeField);
-$('#form').onsubmit=async event=>{event.preventDefault();const value=Object.fromEntries(new FormData(event.target));const response=await api('/api/duties',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(value)}),data=await response.json();if(!response.ok)return toast(data.error);state=data;$('#modal').classList.remove('open');toast('Дежурство назначено');render()};
+document.querySelectorAll('[data-add-mode]').forEach(button=>button.onclick=()=>setAddMode(button.dataset.addMode));
+$('#absenceFields [name=absence_type]').onchange=event=>{$('#absenceFields [name=compensable]').checked=!['vacation','sick_leave','business_trip'].includes(event.target.value)};
+$('#form').onsubmit=async event=>{event.preventDefault();const value=Object.fromEntries(new FormData(event.target));const path=addMode==='duty'?'/api/duties':'/api/absences';const response=await api(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(value)}),data=await response.json();if(!response.ok)return toast(data.error);state=data;$('#modal').classList.remove('open');toast(addMode==='duty'?'Дежурство добавлено':'Отсутствие зафиксировано');render()};
+setAddMode('duty');
 document.querySelectorAll('.check i').forEach(item=>item.onclick=()=>item.classList.toggle('ok'));
 function start(){if(!window.BX24)return load();BX24.init(async()=>{const auth=BX24.getAuth();if(auth?.access_token){b24Headers={'x-b24-token':auth.access_token,'x-b24-domain':auth.domain};await api('/api/bitrix/sync',{method:'POST'})}load()})}
 start();
