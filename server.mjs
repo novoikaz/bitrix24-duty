@@ -18,6 +18,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS portals (member_id TEXT PRIMARY KEY, domain TEXT NOT NULL, access_token TEXT, refresh_token TEXT, expires_at INTEGER);
   CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `);
+if (!db.prepare('PRAGMA table_info(duties)').all().some(column=>column.name==='accounting_mode')) db.exec("ALTER TABLE duties ADD COLUMN accounting_mode TEXT NOT NULL DEFAULT 'schedule'");
 
 if (!db.prepare('SELECT count(*) AS n FROM employees').get().n) {
   const add = db.prepare('INSERT INTO employees (id,name,avatar,is_admin) VALUES (?,?,?,?)');
@@ -103,21 +104,23 @@ async function api(req,res,url) {
   if (req.method==='GET' && url.pathname==='/api/bootstrap') { const user=await b24User(req); return json(res,200,snapshot(user)); }
   if (req.method==='POST' && url.pathname==='/api/duties') {
     const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Изменять график может только администратор портала'});
-    const v=await body(req); if(!['office','support','holiday'].includes(v.kind)||!v.starts_on||!v.ends_on||!Number(v.employee_id)) return json(res,422,{error:'Заполните тип, сотрудника и даты'});
+    const v=await body(req); if(!['office','support','holiday'].includes(v.kind)||!v.starts_on||!v.ends_on||!Number(v.employee_id)||!['schedule','compensate'].includes(v.accounting_mode||'schedule')) return json(res,422,{error:'Заполните тип, сотрудника, даты и режим'});
+    const accountingMode=v.kind==='office'?'schedule':(v.accounting_mode||'schedule');
     const defaultHours=v.kind==='office'?0:(v.kind==='holiday'||v.starts_on===v.ends_on?2:4);
     const hours=v.kind==='office'?0:(v.hours===undefined||v.hours===''?defaultHours:Number(v.hours));
     if(!Number.isFinite(hours)||hours<0||hours>24||(v.kind!=='office'&&hours<=0)) return json(res,422,{error:'Укажите корректное количество часов для дежурства'});
-    const r=db.prepare('INSERT INTO duties (kind,starts_on,ends_on,employee_id,hours) VALUES (?,?,?,?,?)').run(v.kind,v.starts_on,v.ends_on,Number(v.employee_id),hours);
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Назначено дежурство', `${v.kind}: ${v.starts_on}–${v.ends_on}`); return json(res,201,snapshot(actor));
+    const r=db.prepare('INSERT INTO duties (kind,starts_on,ends_on,employee_id,hours,accounting_mode) VALUES (?,?,?,?,?,?)').run(v.kind,v.starts_on,v.ends_on,Number(v.employee_id),hours,accountingMode);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Назначено дежурство', `${v.kind}: ${v.starts_on}–${v.ends_on} · ${accountingMode==='compensate'?'компенсация':'по графику'}`); return json(res,201,snapshot(actor));
   }
   const updateMatch=url.pathname.match(/^\/api\/duties\/(\d+)$/);
   if (req.method==='PATCH' && updateMatch) {
     const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Редактировать назначения может только администратор портала'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(updateMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     if(duty.status!=='scheduled') return json(res,409,{error:'Можно редактировать только неподтверждённое дежурство'});
-    const v=await body(req); const hours=duty.kind==='office'?0:Number(v.hours);
-    if(!Number.isFinite(hours)||hours<=0||hours>24) return json(res,422,{error:'Укажите корректное количество часов'});
-    db.prepare('UPDATE duties SET hours=? WHERE id=?').run(hours,duty.id);
+    const v=await body(req); const hours=duty.kind==='office'?0:Number(v.hours), accountingMode=v.accounting_mode||duty.accounting_mode;
+    if(!Number.isFinite(hours)||hours<0||hours>24||(duty.kind!=='office'&&hours<=0)) return json(res,422,{error:'Укажите корректное количество часов'});
+    if(!['schedule','compensate'].includes(accountingMode)) return json(res,422,{error:'Выберите корректный режим дежурства'});
+    db.prepare('UPDATE duties SET hours=?, accounting_mode=? WHERE id=?').run(hours,accountingMode,duty.id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Изменено дежурство', `${duty.starts_on}–${duty.ends_on}: ${hours} ч`); return json(res,200,snapshot(actor));
   }
   const rejectMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/reject$/);
@@ -133,11 +136,10 @@ async function api(req,res,url) {
     const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Подтверждать дежурства может только администратор портала'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(confirmMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     if(duty.status==='confirmed') return json(res,409,{error:'Дежурство уже подтверждено'});
-    const currentBalance=balance(duty.employee_id);
-    if(currentBalance+duty.hours>0) return json(res,422,{error:`Нельзя компенсировать ${duty.hours} ч: долг сотрудника ${Math.abs(currentBalance)} ч. Измените часы дежурства.`});
     db.prepare('UPDATE duties SET status=? WHERE id=?').run('confirmed',duty.id);
-    if(duty.hours) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(duty.employee_id,duty.ends_on,duty.hours,'support',duty.id,'Подтверждённое дежурство поддержки');
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждено дежурство', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,snapshot(actor));
+    const currentBalance=balance(duty.employee_id), credited=duty.accounting_mode==='compensate'?Math.min(duty.hours,Math.max(0,-currentBalance)):0;
+    if(credited) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(duty.employee_id,duty.ends_on,credited,'support',duty.id,'Подтверждённое компенсирующее дежурство');
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждено дежурство', `${duty.starts_on}–${duty.ends_on} · возвращено ${credited} ч`); return json(res,200,snapshot(actor));
   }
   const deleteMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/delete$/);
   if (req.method==='POST' && deleteMatch) {
@@ -171,7 +173,6 @@ async function api(req,res,url) {
     if(action==='accept') { if(actorId!==request.to_employee_id||request.status!=='pending_target') return json(res,403,{error:'Эта заявка недоступна для подтверждения'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('pending_admin',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Сотрудник согласился на обмен', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
     if(action==='reject') { if(actorId!==request.to_employee_id&&!actor.app_admin) return json(res,403,{error:'Отклонить заявку может получатель или администратор'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('rejected',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Отклонён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
     if(!actor.app_admin||request.status!=='pending_admin') return json(res,403,{error:'Подтверждать обмен может только администратор после согласия сотрудника'});
-    if(request.kind!=='office'&&balance(request.to_employee_id)+request.hours>0) return json(res,422,{error:`Долг выбранного сотрудника меньше ${request.hours} ч. Измените часы дежурства перед обменом.`});
     db.prepare('UPDATE duties SET employee_id=? WHERE id=?').run(request.to_employee_id,request.duty_id); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('approved',request.id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor));
   }

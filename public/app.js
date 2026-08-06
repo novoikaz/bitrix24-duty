@@ -72,8 +72,12 @@ $('#newDuty').onclick=()=>{$('[name=starts_on]').value=dateKey(viewDate);$('[nam
 $('#close').onclick=()=>$('#modal').classList.remove('open');
 const dutyHoursField=document.createElement('div');
 dutyHoursField.className='field';
-dutyHoursField.innerHTML='<label>Списать с баланса, часов</label><input name="hours" type="number" min="0.5" max="24" step="0.5" placeholder="Автоматически: 2 или 4">';
+dutyHoursField.innerHTML='<label>Часы дежурства / максимум компенсации</label><input name="hours" type="number" min="0.5" max="24" step="0.5" placeholder="Автоматически: 2 или 4">';
 $('#form .actions').before(dutyHoursField);
+const dutyModeField=document.createElement('div');
+dutyModeField.className='field';
+dutyModeField.innerHTML='<label>Режим дежурства</label><select name="accounting_mode"><option value="schedule">По графику — баланс не меняется</option><option value="compensate">Списать отсутствие после подтверждения</option></select>';
+$('#form .actions').before(dutyModeField);
 $('#form').onsubmit=async event=>{event.preventDefault();const value=Object.fromEntries(new FormData(event.target));const response=await api('/api/duties',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(value)}),data=await response.json();if(!response.ok)return toast(data.error);state=data;$('#modal').classList.remove('open');toast('Дежурство назначено');render()};
 document.querySelectorAll('.check i').forEach(item=>item.onclick=()=>item.classList.toggle('ok'));
 function start(){if(!window.BX24)return load();BX24.init(async()=>{const auth=BX24.getAuth();if(auth?.access_token){b24Headers={'x-b24-token':auth.access_token,'x-b24-domain':auth.domain};await api('/api/bitrix/sync',{method:'POST'})}load()})}
