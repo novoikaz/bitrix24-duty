@@ -77,6 +77,11 @@ function render(){
   const employeeOptions=state.employees.map(item=>`<option value="${item.id}">${esc(item.name)}</option>`).join('');
   $('#employee').innerHTML=employeeOptions;
   $('#absenceEmployee').innerHTML=employeeOptions;
+  const showEmployeePreview=(selectId,previewId)=>{const employee=state.employees.find(item=>String(item.id)===String($(selectId).value));$(previewId).innerHTML=employee?`${ava(employee)}<span>Выбран: ${esc(employee.name)}</span>`:''};
+  $('#employee').onchange=()=>showEmployeePreview('#employee','#dutyEmployeePreview');
+  $('#absenceEmployee').onchange=()=>showEmployeePreview('#absenceEmployee','#absenceEmployeePreview');
+  showEmployeePreview('#employee','#dutyEmployeePreview');
+  showEmployeePreview('#absenceEmployee','#absenceEmployeePreview');
 }
 
 function toast(text){$('#toast').textContent=text;$('#toast').classList.add('on');setTimeout(()=>$('#toast').classList.remove('on'),2600)}

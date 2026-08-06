@@ -84,6 +84,7 @@ async function reminderTick(){try{const now=almatyNow();if(now.weekday==='Fri')a
 function snapshot(user=null) {
   return {
     employees: db.prepare('SELECT * FROM employees WHERE is_active=1 AND is_eligible=1 ORDER BY name').all(),
+    allEmployees: user?.app_admin ? db.prepare('SELECT * FROM employees WHERE is_active=1 ORDER BY name').all() : [],
     duties: db.prepare(`SELECT d.*, e.name, e.avatar FROM duties d JOIN employees e ON e.id=d.employee_id WHERE d.status NOT IN ('cancelled','rejected') ORDER BY d.starts_on`).all(),
     absences: db.prepare(`SELECT a.*, e.name FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
     balances: db.prepare('SELECT id,name,avatar FROM employees WHERE is_active=1 AND is_eligible=1').all().map(e=>({...e, hours:balance(e.id)})),
