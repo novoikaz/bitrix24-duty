@@ -47,7 +47,7 @@ const balance = id => db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM le
 function snapshot(user=null) {
   return {
     employees: db.prepare('SELECT * FROM employees ORDER BY name').all(),
-    duties: db.prepare(`SELECT d.*, e.name, e.avatar FROM duties d JOIN employees e ON e.id=d.employee_id WHERE d.status!='cancelled' ORDER BY d.starts_on`).all(),
+    duties: db.prepare(`SELECT d.*, e.name, e.avatar FROM duties d JOIN employees e ON e.id=d.employee_id WHERE d.status NOT IN ('cancelled','rejected') ORDER BY d.starts_on`).all(),
     absences: db.prepare(`SELECT a.*, e.name FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
     balances: db.prepare('SELECT id,name,avatar FROM employees').all().map(e=>({...e, hours:balance(e.id)})),
     audit: db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 15').all(),
@@ -74,15 +74,37 @@ async function api(req,res,url) {
   if (req.method==='POST' && url.pathname==='/api/duties') {
     const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Изменять график может только администратор портала'});
     const v=await body(req); if(!['office','support','holiday'].includes(v.kind)||!v.starts_on||!v.ends_on||!Number(v.employee_id)) return json(res,422,{error:'Заполните тип, сотрудника и даты'});
-    const hours=v.kind==='office'?0:(v.kind==='holiday'||v.starts_on===v.ends_on?2:4);
+    const defaultHours=v.kind==='office'?0:(v.kind==='holiday'||v.starts_on===v.ends_on?2:4);
+    const hours=v.kind==='office'?0:(v.hours===undefined||v.hours===''?defaultHours:Number(v.hours));
+    if(!Number.isFinite(hours)||hours<0||hours>24||(v.kind!=='office'&&hours<=0)) return json(res,422,{error:'Укажите корректное количество часов для дежурства'});
     const r=db.prepare('INSERT INTO duties (kind,starts_on,ends_on,employee_id,hours) VALUES (?,?,?,?,?)').run(v.kind,v.starts_on,v.ends_on,Number(v.employee_id),hours);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Назначено дежурство', `${v.kind}: ${v.starts_on}–${v.ends_on}`); return json(res,201,snapshot(actor));
+  }
+  const updateMatch=url.pathname.match(/^\/api\/duties\/(\d+)$/);
+  if (req.method==='PATCH' && updateMatch) {
+    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Редактировать назначения может только администратор портала'});
+    const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(updateMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
+    if(duty.status!=='scheduled') return json(res,409,{error:'Можно редактировать только неподтверждённое дежурство'});
+    const v=await body(req); const hours=duty.kind==='office'?0:Number(v.hours);
+    if(!Number.isFinite(hours)||hours<=0||hours>24) return json(res,422,{error:'Укажите корректное количество часов'});
+    db.prepare('UPDATE duties SET hours=? WHERE id=?').run(hours,duty.id);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Изменено дежурство', `${duty.starts_on}–${duty.ends_on}: ${hours} ч`); return json(res,200,snapshot(actor));
+  }
+  const rejectMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/reject$/);
+  if (req.method==='POST' && rejectMatch) {
+    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Отклонять дежурства может только администратор портала'});
+    const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(rejectMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
+    if(duty.status!=='scheduled') return json(res,409,{error:'Можно отклонить только неподтверждённое дежурство'});
+    db.prepare('UPDATE duties SET status=? WHERE id=?').run('rejected',duty.id);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Отклонено дежурство', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,snapshot(actor));
   }
   const confirmMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/confirm$/);
   if (req.method==='POST' && confirmMatch) {
     const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Подтверждать дежурства может только администратор портала'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(confirmMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     if(duty.status==='confirmed') return json(res,409,{error:'Дежурство уже подтверждено'});
+    const currentBalance=balance(duty.employee_id);
+    if(duty.hours>currentBalance) return json(res,422,{error:`Нельзя списать ${duty.hours} ч: на балансе сотрудника только ${currentBalance} ч. Измените часы или сначала зафиксируйте отсутствие.`});
     db.prepare('UPDATE duties SET status=? WHERE id=?').run('confirmed',duty.id);
     if(duty.hours) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(duty.employee_id,duty.ends_on,-duty.hours,'support',duty.id,'Подтверждённое дежурство поддержки');
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждено дежурство', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,snapshot(actor));
