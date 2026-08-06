@@ -27,6 +27,15 @@ if (!db.prepare('SELECT count(*) AS n FROM employees').get().n) {
   db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note) VALUES (?,?,?,?)').run(1,'2026-08-03',4,'Личное отсутствие');
   db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,note) VALUES (?,?,?,?,?)').run(1,'2026-08-03',4,'absence','Отсутствие');
 }
+// Переход к правилу «отрицательный баланс = долг по дежурству».
+// Старые записи сохраняются, а разовая корректировка начинает новый учёт с нуля.
+if (!db.prepare("SELECT 1 FROM meta WHERE key='negative_balance_v1'").get()) {
+  const employees=db.prepare('SELECT id FROM employees').all();
+  const current=db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?');
+  const adjust=db.prepare('INSERT INTO ledger(employee_id,occurred_on,hours,kind,note) VALUES (?,?,?,?,?)');
+  for(const employee of employees){const value=Number(current.get(employee.id).hours);if(value)adjust.run(employee.id,new Date().toISOString().slice(0,10),-value,'opening_reset','Стартовая корректировка баланса: 0 ч');}
+  db.prepare("INSERT INTO meta(key,value) VALUES ('negative_balance_v1','1')").run();
+}
 
 const json = (res, status, value) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); };
 const body = req => new Promise((resolve,reject) => { let s=''; req.on('data', x=>s+=x); req.on('end',()=>{try{resolve(s?JSON.parse(s):{})}catch{reject(new Error('Некорректный JSON'))}}); });
@@ -125,9 +134,9 @@ async function api(req,res,url) {
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(confirmMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     if(duty.status==='confirmed') return json(res,409,{error:'Дежурство уже подтверждено'});
     const currentBalance=balance(duty.employee_id);
-    if(duty.hours>currentBalance) return json(res,422,{error:`Нельзя списать ${duty.hours} ч: на балансе сотрудника только ${currentBalance} ч. Измените часы или сначала зафиксируйте отсутствие.`});
+    if(currentBalance+duty.hours>0) return json(res,422,{error:`Нельзя компенсировать ${duty.hours} ч: долг сотрудника ${Math.abs(currentBalance)} ч. Измените часы дежурства.`});
     db.prepare('UPDATE duties SET status=? WHERE id=?').run('confirmed',duty.id);
-    if(duty.hours) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(duty.employee_id,duty.ends_on,-duty.hours,'support',duty.id,'Подтверждённое дежурство поддержки');
+    if(duty.hours) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(duty.employee_id,duty.ends_on,duty.hours,'support',duty.id,'Подтверждённое дежурство поддержки');
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждено дежурство', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,snapshot(actor));
   }
   const deleteMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/delete$/);
@@ -141,7 +150,7 @@ async function api(req,res,url) {
     const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Вносить отсутствие может только администратор портала'});
     const v=await body(req); const hours=Number(v.hours); if(!Number(v.employee_id)||!v.occurred_on||!hours||hours>24) return json(res,422,{error:'Проверьте данные отсутствия'});
     const r=db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note) VALUES (?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,v.note||'');
-    db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
+    db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${hours} ч · ${v.occurred_on}`); return json(res,201,snapshot(actor));
   }
   if (req.method==='POST' && url.pathname==='/api/swaps') {
@@ -162,7 +171,7 @@ async function api(req,res,url) {
     if(action==='accept') { if(actorId!==request.to_employee_id||request.status!=='pending_target') return json(res,403,{error:'Эта заявка недоступна для подтверждения'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('pending_admin',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Сотрудник согласился на обмен', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
     if(action==='reject') { if(actorId!==request.to_employee_id&&!actor.app_admin) return json(res,403,{error:'Отклонить заявку может получатель или администратор'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('rejected',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Отклонён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
     if(!actor.app_admin||request.status!=='pending_admin') return json(res,403,{error:'Подтверждать обмен может только администратор после согласия сотрудника'});
-    if(request.kind!=='office'&&balance(request.to_employee_id)<request.hours) return json(res,422,{error:`У выбранного сотрудника недостаточно часов для списания (${request.hours} ч)`});
+    if(request.kind!=='office'&&balance(request.to_employee_id)+request.hours>0) return json(res,422,{error:`Долг выбранного сотрудника меньше ${request.hours} ч. Измените часы дежурства перед обменом.`});
     db.prepare('UPDATE duties SET employee_id=? WHERE id=?').run(request.to_employee_id,request.duty_id); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('approved',request.id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor));
   }

@@ -55,7 +55,8 @@ function render(){
   $('#calendar').innerHTML=html;
   document.querySelectorAll('.delete').forEach(button=>button.onclick=async event=>{event.stopPropagation();if(!confirm('Удалить это дежурство?'))return;const response=await api(`/api/duties/${button.dataset.id}/delete`,{method:'POST'}),data=await response.json();if(!response.ok)return toast(data.error);state=data;toast('Дежурство удалено');render()});
   const me=state.balances.find(item=>item.id===state.currentEmployeeId)||state.balances[0];
-  $('#balance').innerHTML=`${me?me.hours:'0'} ч <span class="sub">к компенсации</span>`;
+  $('#balance').innerHTML=`${me?me.hours:'0'} ч <span class="sub">к отработке</span>`;
+  $('#balance').parentElement.querySelector(':scope > .sub').textContent='Отрицательное число — часы, которые нужно отдежурить.';
   const nextOffice=state.duties.find(item=>item.kind==='office'&&item.ends_on>=dateKey(now));
   const nextSupport=state.duties.find(item=>(item.kind==='support'||item.kind==='holiday')&&item.ends_on>=dateKey(now));
   $('#office').innerHTML=person(office||nextOffice);
