@@ -24,6 +24,7 @@ if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name===
 if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='compensable')) db.exec('ALTER TABLE absences ADD COLUMN compensable INTEGER NOT NULL DEFAULT 1');
 if (!db.prepare('PRAGMA table_info(employees)').all().some(column=>column.name==='is_active')) db.exec('ALTER TABLE employees ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1');
 if (!db.prepare('PRAGMA table_info(employees)').all().some(column=>column.name==='is_eligible')) db.exec('ALTER TABLE employees ADD COLUMN is_eligible INTEGER NOT NULL DEFAULT 1');
+if (!db.prepare('PRAGMA table_info(employees)').all().some(column=>column.name==='is_editor')) db.exec('ALTER TABLE employees ADD COLUMN is_editor INTEGER NOT NULL DEFAULT 0');
 
 if (!db.prepare('SELECT count(*) AS n FROM employees').get().n) {
   const add = db.prepare('INSERT INTO employees (id,name,avatar,is_admin) VALUES (?,?,?,?)');
@@ -59,6 +60,7 @@ async function b24User(req) {
   if(!user?.ID) return null; user.app_admin=admin.result===true; authCache.set(token,{user,until:Date.now()+60_000}); return user;
 }
 const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || (await b24User(req))?.IS_ADMIN === 'Y');
+const canEdit = user => Boolean(user?.app_admin || db.prepare('SELECT is_editor FROM employees WHERE id=?').get(Number(user?.ID||0))?.is_editor);
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
 const balance = id => db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?').get(id).hours;
 const dutyMessage = duty => duty.kind==='office'
@@ -84,13 +86,14 @@ async function reminderTick(){try{const now=almatyNow();if(now.weekday==='Fri')a
 function snapshot(user=null) {
   return {
     employees: db.prepare('SELECT * FROM employees WHERE is_active=1 AND is_eligible=1 ORDER BY name').all(),
-    allEmployees: user?.app_admin ? db.prepare('SELECT * FROM employees WHERE is_active=1 ORDER BY name').all() : [],
+    allEmployees: canEdit(user) ? db.prepare('SELECT * FROM employees WHERE is_active=1 ORDER BY name').all() : [],
+    editors: user?.app_admin ? db.prepare('SELECT id,name,avatar,is_editor FROM employees WHERE is_active=1 ORDER BY name').all() : [],
     duties: db.prepare(`SELECT d.*, e.name, e.avatar FROM duties d JOIN employees e ON e.id=d.employee_id WHERE d.status NOT IN ('cancelled','rejected') ORDER BY d.starts_on`).all(),
     absences: db.prepare(`SELECT a.*, e.name FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
     balances: db.prepare('SELECT id,name,avatar FROM employees WHERE is_active=1 AND is_eligible=1').all().map(e=>({...e, hours:balance(e.id)})),
     audit: db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 15').all(),
     swapRequests: db.prepare(`SELECT s.*, d.kind, d.starts_on, d.ends_on, d.hours, f.name AS from_name, t.name AS to_name FROM swap_requests s JOIN duties d ON d.id=s.duty_id JOIN employees f ON f.id=s.from_employee_id JOIN employees t ON t.id=s.to_employee_id WHERE s.status NOT IN ('rejected','cancelled') ORDER BY s.id DESC`).all(),
-    permissions: { canEdit: Boolean(user?.app_admin) },
+    permissions: { canEdit: canEdit(user), canManageEditors: Boolean(user?.app_admin) },
     currentEmployeeId: user ? Number(user.ID) : null
   };
 }
@@ -111,16 +114,24 @@ async function syncEmployees(req) {
 async function api(req,res,url) {
   if (req.method==='POST' && url.pathname==='/api/bitrix/sync') { const user=await syncEmployees(req); return json(res,200,snapshot(user)); }
   if (req.method==='GET' && url.pathname==='/api/bootstrap') { const user=await b24User(req); return json(res,200,snapshot(user)); }
+  const editorMatch=url.pathname.match(/^\/api\/employees\/(\d+)\/editor$/);
+  if(req.method==='PATCH'&&editorMatch){
+    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Выдавать права редактора может только администратор портала'});
+    const employee=db.prepare('SELECT * FROM employees WHERE id=?').get(Number(editorMatch[1])); if(!employee) return json(res,404,{error:'Сотрудник не найден'});
+    const value=await body(req), enabled=value.enabled===true||value.enabled==='true';
+    db.prepare('UPDATE employees SET is_editor=? WHERE id=?').run(enabled?1:0,employee.id);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Изменены права редактора',`${employee.name}: ${enabled?'редактор':'просмотр'}`); return json(res,200,snapshot(actor));
+  }
   const eligibilityMatch=url.pathname.match(/^\/api\/employees\/(\d+)\/eligibility$/);
   if(req.method==='PATCH'&&eligibilityMatch){
-    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Менять состав графика может только администратор портала'});
+    const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для изменения графика'});
     const employee=db.prepare('SELECT * FROM employees WHERE id=?').get(Number(eligibilityMatch[1])); if(!employee) return json(res,404,{error:'Сотрудник не найден'});
     const v=await body(req), eligible=v.eligible===true||v.eligible==='true'||v.eligible==='on';
     db.prepare('UPDATE employees SET is_eligible=? WHERE id=?').run(eligible?1:0,employee.id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Изменён состав графика',`${employee.name}: ${eligible?'участвует':'исключён'}`); return json(res,200,snapshot(actor));
   }
   if (req.method==='POST' && url.pathname==='/api/duties') {
-    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Изменять график может только администратор портала'});
+    const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для изменения графика'});
     const v=await body(req); if(!['office','support','holiday'].includes(v.kind)||!v.starts_on||!v.ends_on||!Number(v.employee_id)||!['schedule','compensate'].includes(v.accounting_mode||'schedule')||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(Number(v.employee_id))) return json(res,422,{error:'Выберите действующего сотрудника из состава графика'});
     const accountingMode=v.kind==='office'?'schedule':(v.accounting_mode||'schedule');
     const defaultHours=v.kind==='office'?0:(v.kind==='holiday'||v.starts_on===v.ends_on?2:4);
@@ -131,7 +142,7 @@ async function api(req,res,url) {
   }
   const updateMatch=url.pathname.match(/^\/api\/duties\/(\d+)$/);
   if (req.method==='PATCH' && updateMatch) {
-    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Редактировать назначения может только администратор портала'});
+    const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для редактирования'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(updateMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     if(duty.status!=='scheduled') return json(res,409,{error:'Можно редактировать только неподтверждённое дежурство'});
     const v=await body(req); const hours=duty.kind==='office'?0:Number(v.hours), accountingMode=v.accounting_mode||duty.accounting_mode;
@@ -142,7 +153,7 @@ async function api(req,res,url) {
   }
   const rejectMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/reject$/);
   if (req.method==='POST' && rejectMatch) {
-    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Отклонять дежурства может только администратор портала'});
+    const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для редактирования'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(rejectMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     if(duty.status!=='scheduled') return json(res,409,{error:'Можно отклонить только неподтверждённое дежурство'});
     db.prepare('UPDATE duties SET status=? WHERE id=?').run('rejected',duty.id);
@@ -150,7 +161,7 @@ async function api(req,res,url) {
   }
   const confirmMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/confirm$/);
   if (req.method==='POST' && confirmMatch) {
-    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Подтверждать дежурства может только администратор портала'});
+    const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для подтверждения'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(confirmMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     if(duty.status==='confirmed') return json(res,409,{error:'Дежурство уже подтверждено'});
     db.prepare('UPDATE duties SET status=? WHERE id=?').run('confirmed',duty.id);
@@ -160,13 +171,13 @@ async function api(req,res,url) {
   }
   const deleteMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/delete$/);
   if (req.method==='POST' && deleteMatch) {
-    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Удалять назначения может только администратор портала'});
+    const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для редактирования'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(deleteMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     db.prepare('DELETE FROM ledger WHERE reference_id=? AND kind=?').run(duty.id,'support'); db.prepare('DELETE FROM duties WHERE id=?').run(duty.id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Удалено дежурство', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,snapshot(actor));
   }
   if (req.method==='POST' && url.pathname==='/api/absences') {
-    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Вносить отсутствие может только администратор портала'});
+    const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для редактирования'});
     const v=await body(req); const hours=Number(v.hours), absenceType=String(v.absence_type||'personal');
     if(!Number(v.employee_id)||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(Number(v.employee_id))||!v.occurred_on||!hours||hours>720||!['vacation','sick_leave','time_off','business_trip','personal','other'].includes(absenceType)) return json(res,422,{error:'Выберите действующего сотрудника и проверьте данные отсутствия'});
     const compensable=v.compensable===true||v.compensable==='true'||v.compensable==='on';
@@ -181,7 +192,7 @@ async function api(req,res,url) {
     const action=officeAction[2], actorName=`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim();
     if(action==='acknowledge'){if(Number(actor.ID)!==duty.employee_id||duty.office_status!=='scheduled') return json(res,403,{error:'Подтвердить готовность может назначенный сотрудник'});db.prepare('UPDATE duties SET office_status=? WHERE id=?').run('acknowledged',duty.id);audit(actorName,'Сотрудник подтвердил офисное дежурство',duty.starts_on);return json(res,200,snapshot(actor));}
     if(action==='decline'){if(Number(actor.ID)!==duty.employee_id||!['scheduled','acknowledged'].includes(duty.office_status)) return json(res,403,{error:'Отказаться может назначенный сотрудник'});const v=await body(req);db.prepare('UPDATE duties SET office_status=? WHERE id=?').run('declined',duty.id);audit(actorName,'Сотрудник не может дежурить в офисе',`${duty.starts_on}${v.note?` · ${v.note}`:''}`);return json(res,200,snapshot(actor));}
-    if(!actor.app_admin||duty.office_status!=='acknowledged') return json(res,403,{error:'Выполнение подтверждает администратор после подтверждения сотрудника'});db.prepare('UPDATE duties SET office_status=? WHERE id=?').run('completed',duty.id);audit(actorName,'Подтверждено выполнение офисного дежурства',duty.starts_on);return json(res,200,snapshot(actor));
+    if(!canEdit(actor)||duty.office_status!=='acknowledged') return json(res,403,{error:'Выполнение подтверждает редактор после подтверждения сотрудника'});db.prepare('UPDATE duties SET office_status=? WHERE id=?').run('completed',duty.id);audit(actorName,'Подтверждено выполнение офисного дежурства',duty.starts_on);return json(res,200,snapshot(actor));
   }
   if (req.method==='POST' && url.pathname==='/api/swaps') {
     const actor=await b24User(req); if(!actor) return json(res,401,{error:'Не удалось определить пользователя Bitrix24'});
@@ -200,7 +211,7 @@ async function api(req,res,url) {
     if(!request) return json(res,404,{error:'Заявка на обмен не найдена'}); const action=swapAction[2], actorId=Number(actor.ID);
     if(action==='accept') { if(actorId!==request.to_employee_id||request.status!=='pending_target') return json(res,403,{error:'Эта заявка недоступна для подтверждения'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('pending_admin',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Сотрудник согласился на обмен', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
     if(action==='reject') { if(actorId!==request.to_employee_id&&!actor.app_admin) return json(res,403,{error:'Отклонить заявку может получатель или администратор'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('rejected',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Отклонён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
-    if(!actor.app_admin||request.status!=='pending_admin') return json(res,403,{error:'Подтверждать обмен может только администратор после согласия сотрудника'});
+    if(!canEdit(actor)||request.status!=='pending_admin') return json(res,403,{error:'Подтверждать обмен может только редактор после согласия сотрудника'});
     // Если смена уже подтверждена как компенсирующая, переносим её учёт с прежнего сотрудника на нового.
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(request.duty_id);
     db.prepare('DELETE FROM ledger WHERE reference_id=? AND kind=?').run(duty.id,'support');
@@ -214,7 +225,7 @@ async function api(req,res,url) {
   }
   const remindMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/remind$/);
   if(req.method==='POST' && remindMatch) {
-    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Отправлять напоминания может только администратор портала'});
+    const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для отправки напоминаний'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(remindMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     await notifyByWebhook(duty.employee_id,dutyMessage(duty)); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Отправлено напоминание', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,{ok:true});
   }
