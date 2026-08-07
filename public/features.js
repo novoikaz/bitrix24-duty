@@ -172,6 +172,9 @@
   if(window.BX24)BX24.init(bind);else window.addEventListener('load',bind);
 })();
 
+/* Рабочий чек-лист офисного дежурства. */
+(()=>{const style=document.createElement('style');style.textContent='.check-progress{display:inline-flex;gap:5px;align-items:center;padding:5px 8px;border-radius:8px;background:#eef4ff;color:#526d9b;font-size:11px}.task-check{cursor:default!important;border-radius:8px;padding:7px 8px;margin:2px 0}.task-check:has(input:not(:disabled)){cursor:pointer!important}.task-check:hover{background:#f6f8fc}.task-check input{width:17px;height:17px;accent-color:#3268e9;margin:0}.task-check input:disabled{opacity:.55}.task-check input:checked+span{text-decoration:line-through;color:#71809a}';document.head.append(style)})();
+
 /* Читаемая история действий на главном экране. */
 (()=>{const style=document.createElement('style');style.textContent='#audit .audit-entry{display:grid;grid-template-columns:28px minmax(0,1fr);gap:9px;padding:9px 0;border-top:1px solid #eff2f7;font-size:12px}#audit .audit-entry:first-child{border-top:0}#audit .audit-entry .ava{width:28px;height:28px;font-size:9px;object-fit:cover}#audit .audit-entry strong,#audit .audit-entry span,#audit .audit-entry small{display:block}#audit .audit-entry strong{font-size:12px;color:#253653}#audit .audit-author{color:#49628b;font-weight:700;margin-top:1px}#audit .audit-detail{color:#6d7d96;margin-top:2px}#audit .audit-entry small{color:#9aa7ba;margin-top:3px;font-size:10px}';document.head.append(style)})();
 

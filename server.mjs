@@ -15,6 +15,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, actor TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS swap_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, duty_id INTEGER NOT NULL, from_employee_id INTEGER NOT NULL, to_employee_id INTEGER NOT NULL, note TEXT, status TEXT NOT NULL DEFAULT 'pending_target', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(duty_id) REFERENCES duties(id), FOREIGN KEY(from_employee_id) REFERENCES employees(id), FOREIGN KEY(to_employee_id) REFERENCES employees(id));
   CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, duty_id INTEGER NOT NULL, type TEXT NOT NULL, sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(duty_id,type), FOREIGN KEY(duty_id) REFERENCES duties(id));
+  CREATE TABLE IF NOT EXISTS duty_checklist (duty_id INTEGER NOT NULL, item_key TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(duty_id,item_key), FOREIGN KEY(duty_id) REFERENCES duties(id));
   CREATE TABLE IF NOT EXISTS portals (member_id TEXT PRIMARY KEY, domain TEXT NOT NULL, access_token TEXT, refresh_token TEXT, expires_at INTEGER);
   CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `);
@@ -95,6 +96,7 @@ function snapshot(user=null) {
     absences: db.prepare(`SELECT a.*, e.name FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
     balances: db.prepare('SELECT id,name,avatar FROM employees WHERE is_active=1 AND is_eligible=1').all().map(e=>({...e, hours:balance(e.id)})),
     audit: db.prepare('SELECT a.*, e.id AS actor_id, e.name AS actor_name, e.avatar AS actor_avatar FROM audit_log a LEFT JOIN employees e ON e.name=a.actor ORDER BY a.id DESC LIMIT 15').all(),
+    officeChecklist: db.prepare('SELECT duty_id,item_key,done,updated_at FROM duty_checklist').all(),
     swapRequests: db.prepare(`SELECT s.*, d.kind, d.starts_on, d.ends_on, d.hours, f.name AS from_name, t.name AS to_name FROM swap_requests s JOIN duties d ON d.id=s.duty_id JOIN employees f ON f.id=s.from_employee_id JOIN employees t ON t.id=s.to_employee_id WHERE s.status NOT IN ('rejected','cancelled') ORDER BY s.id DESC`).all(),
     permissions: { canEdit: canEdit(user), canManageEditors: Boolean(user?.app_admin) },
     currentEmployeeId: user ? Number(user.ID) : null
@@ -188,11 +190,22 @@ async function api(req,res,url) {
     if(compensable) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${absenceType} · ${hours} ч · ${v.occurred_on}${compensable?' · учтено в отработке':''}`); return json(res,201,snapshot(actor));
   }
+  const checklistMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/checklist$/);
+  if(req.method==='PATCH' && checklistMatch){
+    const actor=await b24User(req); if(!actor) return json(res,401,{error:'Не удалось определить пользователя Bitrix24'});
+    const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(checklistMatch[1]));
+    const v=await body(req), allowed=['trash','surfaces','equipment','windows'];
+    if(!duty||duty.kind!=='office'||duty.employee_id!==Number(actor.ID)||!['scheduled','acknowledged'].includes(duty.office_status)||!allowed.includes(v.item_key)) return json(res,403,{error:'Изменять чек-лист может только назначенный офисный дежурный'});
+    db.prepare("INSERT INTO duty_checklist(duty_id,item_key,done,updated_at) VALUES (?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(duty_id,item_key) DO UPDATE SET done=excluded.done,updated_at=CURRENT_TIMESTAMP").run(duty.id,v.item_key,v.done?1:0);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Обновлён чек-лист офиса', `${employeeName(duty.employee_id)} · ${duty.starts_on} · ${v.item_key}: ${v.done?'выполнено':'не выполнено'}`);
+    return json(res,200,snapshot(actor));
+  }
   const officeAction=url.pathname.match(/^\/api\/duties\/(\d+)\/office\/(acknowledge|decline|complete)$/);
   if(req.method==='POST' && officeAction){
     const actor=await b24User(req); if(!actor) return json(res,401,{error:'Не удалось определить пользователя Bitrix24'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(officeAction[1])); if(!duty||duty.kind!=='office') return json(res,404,{error:'Офисное дежурство не найдено'});
     const action=officeAction[2], actorName=`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim();
+    if(action==='complete'){const completed=db.prepare('SELECT count(*) AS n FROM duty_checklist WHERE duty_id=? AND done=1').get(duty.id).n;if(completed<4)return json(res,422,{error:`Перед подтверждением нужно выполнить чек-лист: отмечено ${completed} из 4`});}
     if(action==='acknowledge'){if(Number(actor.ID)!==duty.employee_id||duty.office_status!=='scheduled') return json(res,403,{error:'Подтвердить готовность может назначенный сотрудник'});db.prepare('UPDATE duties SET office_status=? WHERE id=?').run('acknowledged',duty.id);audit(actorName,'Сотрудник подтвердил офисное дежурство',duty.starts_on);return json(res,200,snapshot(actor));}
     if(action==='decline'){if(Number(actor.ID)!==duty.employee_id||!['scheduled','acknowledged'].includes(duty.office_status)) return json(res,403,{error:'Отказаться может назначенный сотрудник'});const v=await body(req);db.prepare('UPDATE duties SET office_status=? WHERE id=?').run('declined',duty.id);audit(actorName,'Сотрудник не может дежурить в офисе',`${duty.starts_on}${v.note?` · ${v.note}`:''}`);return json(res,200,snapshot(actor));}
     if(!canEdit(actor)||duty.office_status!=='acknowledged') return json(res,403,{error:'Выполнение подтверждает редактор после подтверждения сотрудника'});db.prepare('UPDATE duties SET office_status=? WHERE id=?').run('completed',duty.id);audit(actorName,'Подтверждено выполнение офисного дежурства',duty.starts_on);return json(res,200,snapshot(actor));

@@ -14,6 +14,16 @@ async function load(){state=await api('/api/bootstrap').then(response=>response.
 function initials(name){return name.split(' ').map(part=>part[0]).join('').slice(0,2)}
 function ava(employee){return employee?.avatar?`<img class="ava" src="${esc(employee.avatar)}" alt="">`:`<span class="ava">${initials(employee?.name||'?')}</span>`}
 function person(duty){return duty?`<div class="person">${ava(duty)}<div><b>${esc(duty.name)}</b><br><span class="sub">${duty.starts_on}–${duty.ends_on}</span></div><span class="right">${duty.hours?`${duty.hours} ч`:'офис'}</span></div>`:'<span class="sub">Не назначен</span>'}
+const officeChecklistItems=[['trash','Убрать мусор'],['surfaces','Протереть поверхности'],['equipment','Выключить технику и свет'],['windows','Проверить окна и двери']];
+function renderOfficeChecklist(duty){
+  const card=document.querySelector('.ops .card:first-child'); if(!card)return;
+  if(!duty||duty.kind!=='office'){card.innerHTML='<h2>Чек-лист офиса</h2><div class="sub">Появится для назначенного сотрудника в день офисного дежурства.</div>';return}
+  const checks=state.officeChecklist||[],done=new Set(checks.filter(item=>item.duty_id===duty.id&&Number(item.done)).map(item=>item.item_key)),count=done.size;
+  const mine=Number(duty.employee_id)===Number(state.currentEmployeeId),admin=state.permissions.canEdit,canEdit=mine&&['scheduled','acknowledged'].includes(duty.office_status);
+  const note=canEdit?'Отмечайте задачи по мере выполнения. Результат сохранится автоматически.':admin?'Прогресс дежурного доступен для проверки.':`Чек-лист доступен ${esc(duty.name)} — назначенному сотруднику.`;
+  card.innerHTML=`<h2>Чек-лист офиса</h2><div class="check-progress"><b>${count} из ${officeChecklistItems.length}</b> выполнено</div><div class="sub" style="margin:4px 0 8px">${note}</div>${officeChecklistItems.map(([key,label])=>`<label class="check task-check"><input type="checkbox" data-check-item="${key}" ${done.has(key)?'checked':''} ${canEdit?'':'disabled'}><span>${label}</span></label>`).join('')}`;
+  card.querySelectorAll('[data-check-item]').forEach(input=>input.onchange=async()=>{const response=await api(`/api/duties/${duty.id}/checklist`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({item_key:input.dataset.checkItem,done:input.checked})}),data=await response.json();if(!response.ok){toast(data.error||'Не удалось сохранить пункт');input.checked=!input.checked;return}state=data;render()});
+}
 
 function addCalendarToolbar(){
   if($('#monthTitle'))return;
@@ -71,6 +81,7 @@ function render(){
     document.querySelectorAll('[data-office-action]').forEach(button=>button.onclick=async()=>{const action=button.dataset.officeAction,note=action==='decline'?prompt('Коротко укажите причину (необязательно):')||'':'';const response=await api(`/api/duties/${shownOffice.id}/office/${action}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({note})}),data=await response.json();if(!response.ok)return toast(data.error);state=data;toast(action==='acknowledge'?'Готовность подтверждена':action==='decline'?'Администратор увидит отказ':'Выполнение подтверждено');render()});
   }
   $('#support').innerHTML=person(support||nextSupport);
+  renderOfficeChecklist(shownOffice);
   $('#audit').innerHTML=state.audit.length?state.audit.map(item=>{const author={name:item.actor_name||item.actor||'Система',avatar:item.actor_avatar||''};return `<div class="audit-entry">${ava(author)}<div><strong>${esc(item.action)}</strong><span class="audit-author">Автор: ${esc(author.name)}</span><span class="audit-detail">${esc(item.detail)}</span><small>${esc(item.occurred_at)}</small></div></div>`}).join(''):'Пока нет изменений';
   const admin=state.permissions.canEdit;$('#mode').textContent=admin?'Администратор портала':'Режим просмотра';
   document.querySelectorAll('.admin').forEach(item=>item.style.display=admin?'inline-block':'none');
