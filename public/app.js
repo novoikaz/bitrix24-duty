@@ -71,7 +71,7 @@ function render(){
     document.querySelectorAll('[data-office-action]').forEach(button=>button.onclick=async()=>{const action=button.dataset.officeAction,note=action==='decline'?prompt('Коротко укажите причину (необязательно):')||'':'';const response=await api(`/api/duties/${shownOffice.id}/office/${action}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({note})}),data=await response.json();if(!response.ok)return toast(data.error);state=data;toast(action==='acknowledge'?'Готовность подтверждена':action==='decline'?'Администратор увидит отказ':'Выполнение подтверждено');render()});
   }
   $('#support').innerHTML=person(support||nextSupport);
-  $('#audit').innerHTML=state.audit.length?state.audit.map(item=>`<div class="line"><strong>${esc(item.action)}</strong>${esc(item.detail)}<br>${item.occurred_at}</div>`).join(''):'Пока нет изменений';
+  $('#audit').innerHTML=state.audit.length?state.audit.map(item=>{const author={name:item.actor_name||item.actor||'Система',avatar:item.actor_avatar||''};return `<div class="audit-entry">${ava(author)}<div><strong>${esc(item.action)}</strong><span class="audit-author">Автор: ${esc(author.name)}</span><span class="audit-detail">${esc(item.detail)}</span><small>${esc(item.occurred_at)}</small></div></div>`}).join(''):'Пока нет изменений';
   const admin=state.permissions.canEdit;$('#mode').textContent=admin?'Администратор портала':'Режим просмотра';
   document.querySelectorAll('.admin').forEach(item=>item.style.display=admin?'inline-block':'none');
   const employeeOptions=state.employees.map(item=>`<option value="${item.id}">${esc(item.name)}</option>`).join('');

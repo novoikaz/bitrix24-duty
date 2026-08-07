@@ -63,6 +63,7 @@ const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || 
 const canEdit = user => Boolean(user?.app_admin || db.prepare('SELECT is_editor FROM employees WHERE id=?').get(Number(user?.ID||0))?.is_editor);
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
 const balance = id => db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?').get(id).hours;
+const employeeName = id => db.prepare('SELECT name FROM employees WHERE id=?').get(Number(id))?.name || 'Сотрудник';
 const dutyMessage = duty => duty.kind==='office'
   ? `Напоминание: сегодня с 17:00 до 18:00 ваше офисное дежурство. Откройте «Дежурства» и подтвердите готовность.`
   : `Напоминание: сегодня с 09:00 до 18:00 ваше дежурство поддержки. Проверьте обращения клиентов в Bitrix24.`;
@@ -93,7 +94,7 @@ function snapshot(user=null) {
     duties: db.prepare(`SELECT d.*, e.name, e.avatar FROM duties d JOIN employees e ON e.id=d.employee_id WHERE d.status NOT IN ('cancelled','rejected') ORDER BY d.starts_on`).all(),
     absences: db.prepare(`SELECT a.*, e.name FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
     balances: db.prepare('SELECT id,name,avatar FROM employees WHERE is_active=1 AND is_eligible=1').all().map(e=>({...e, hours:balance(e.id)})),
-    audit: db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 15').all(),
+    audit: db.prepare('SELECT a.*, e.id AS actor_id, e.name AS actor_name, e.avatar AS actor_avatar FROM audit_log a LEFT JOIN employees e ON e.name=a.actor ORDER BY a.id DESC LIMIT 15').all(),
     swapRequests: db.prepare(`SELECT s.*, d.kind, d.starts_on, d.ends_on, d.hours, f.name AS from_name, t.name AS to_name FROM swap_requests s JOIN duties d ON d.id=s.duty_id JOIN employees f ON f.id=s.from_employee_id JOIN employees t ON t.id=s.to_employee_id WHERE s.status NOT IN ('rejected','cancelled') ORDER BY s.id DESC`).all(),
     permissions: { canEdit: canEdit(user), canManageEditors: Boolean(user?.app_admin) },
     currentEmployeeId: user ? Number(user.ID) : null
@@ -140,7 +141,7 @@ async function api(req,res,url) {
     const hours=v.kind==='office'?0:(v.hours===undefined||v.hours===''?defaultHours:Number(v.hours));
     if(!Number.isFinite(hours)||hours<0||hours>24||(v.kind!=='office'&&hours<=0)) return json(res,422,{error:'Укажите корректное количество часов для дежурства'});
     const r=db.prepare('INSERT INTO duties (kind,starts_on,ends_on,employee_id,hours,accounting_mode) VALUES (?,?,?,?,?,?)').run(v.kind,v.starts_on,v.ends_on,Number(v.employee_id),hours,accountingMode);
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Назначено дежурство', `${v.kind}: ${v.starts_on}–${v.ends_on} · ${accountingMode==='compensate'?'компенсация':'по графику'}`); return json(res,201,snapshot(actor));
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Назначено дежурство', `${v.kind==='office'?'Офис':'Поддержка'} · ${employeeName(v.employee_id)} · ${v.starts_on}–${v.ends_on} · ${accountingMode==='compensate'?'компенсация':'по графику'}`); return json(res,201,snapshot(actor));
   }
   const updateMatch=url.pathname.match(/^\/api\/duties\/(\d+)$/);
   if (req.method==='PATCH' && updateMatch) {
@@ -169,7 +170,7 @@ async function api(req,res,url) {
     db.prepare('UPDATE duties SET status=? WHERE id=?').run('confirmed',duty.id);
     const currentBalance=balance(duty.employee_id), credited=duty.accounting_mode==='compensate'?Math.min(duty.hours,Math.max(0,-currentBalance)):0;
     if(credited) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(duty.employee_id,duty.ends_on,credited,'support',duty.id,'Подтверждённое компенсирующее дежурство');
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждено дежурство', `${duty.starts_on}–${duty.ends_on} · возвращено ${credited} ч`); return json(res,200,snapshot(actor));
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждено дежурство', `${duty.kind==='office'?'Офис':'Поддержка'} · ${employeeName(duty.employee_id)} · ${duty.starts_on}–${duty.ends_on} · возвращено ${credited} ч`); return json(res,200,snapshot(actor));
   }
   const deleteMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/delete$/);
   if (req.method==='POST' && deleteMatch) {
