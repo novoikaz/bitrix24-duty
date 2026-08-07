@@ -77,7 +77,9 @@ async function notifyByWebhook(employeeId,message) {
 function almatyNow(){const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Almaty',year:'numeric',month:'2-digit',day:'2-digit',weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});const values=Object.fromEntries(formatter.formatToParts(new Date()).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));return {date:`${values.year}-${values.month}-${values.day}`,weekday:values.weekday,hour:Number(values.hour),minute:Number(values.minute)};}
 async function sendDueReminders(kind,now=almatyNow()){
   const scheduledHour=kind==='office'?14:6;
-  if(now.hour!==scheduledHour||now.minute>5) return 0;
+  const startHour=kind==='office'?17:9;
+  // Если Render проснулся не ровно в минуту отправки, напоминание всё равно уйдёт до начала дежурства.
+  if(now.hour<scheduledHour||now.hour>=startHour) return 0;
   const duties=db.prepare("SELECT * FROM duties WHERE starts_on=? AND status='scheduled' AND (kind=? OR (?='support' AND kind='holiday'))").all(now.date,kind,kind); let sent=0;
   for(const duty of duties){if(db.prepare('SELECT 1 FROM notifications WHERE duty_id=? AND type=?').get(duty.id,'three_hours'))continue;await notifyByWebhook(duty.employee_id,dutyMessage(duty));db.prepare('INSERT INTO notifications(duty_id,type) VALUES (?,?)').run(duty.id,'three_hours');sent++;}
   if(sent)audit('Автоматическое напоминание','Отправлены напоминания',`${kind}: ${sent}`); return sent;
@@ -179,7 +181,7 @@ async function api(req,res,url) {
   if (req.method==='POST' && url.pathname==='/api/absences') {
     const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для редактирования'});
     const v=await body(req); const hours=Number(v.hours), absenceType=String(v.absence_type||'personal');
-    if(!Number(v.employee_id)||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(Number(v.employee_id))||!v.occurred_on||!hours||hours>720||!['vacation','sick_leave','time_off','business_trip','personal','other'].includes(absenceType)) return json(res,422,{error:'Выберите действующего сотрудника и проверьте данные отсутствия'});
+    if(!Number(v.employee_id)||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(Number(v.employee_id))||!v.occurred_on||!hours||hours>720||!['vacation','sick_leave','time_off','business_trip','personal','unpaid_leave','other'].includes(absenceType)) return json(res,422,{error:'Выберите действующего сотрудника и проверьте данные отсутствия'});
     const compensable=v.compensable===true||v.compensable==='true'||v.compensable==='on';
     const r=db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note,absence_type,compensable) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,v.note||'',absenceType,compensable?1:0);
     if(compensable) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
