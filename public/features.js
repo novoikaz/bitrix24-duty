@@ -172,6 +172,11 @@
   if(window.BX24)BX24.init(bind);else window.addEventListener('load',bind);
 })();
 
+/* Переход в календарь через пункт левого меню из любого раздела. */
+(()=>{const bind=()=>{document.querySelectorAll('.nav span')[0]?.addEventListener('click',()=>location.reload())};if(window.BX24)BX24.init(bind);else addEventListener('load',bind)})();
+/* Явные действия для получателя заявки на обмен. */
+(()=>{const style=document.createElement('style');style.textContent='button[data-accept]{background:#23845f!important;border-color:#23845f!important;color:#fff!important}button[data-accept]:hover{background:#176b4b!important}button[data-reject-swap]{background:#fff2f2!important;border-color:#f2b7b7!important;color:#b23d3d!important}button[data-reject-swap]:hover{background:#ffe5e5!important;border-color:#e88f8f!important}';document.head.append(style)})();
+
 /* Рабочий чек-лист офисного дежурства. */
 (()=>{const style=document.createElement('style');style.textContent='.check-progress{display:inline-flex;gap:5px;align-items:center;padding:5px 8px;border-radius:8px;background:#eef4ff;color:#526d9b;font-size:11px}.task-check{cursor:default!important;border-radius:8px;padding:7px 8px;margin:2px 0}.task-check:has(input:not(:disabled)){cursor:pointer!important}.task-check:hover{background:#f6f8fc}.task-check input{width:17px;height:17px;accent-color:#3268e9;margin:0}.task-check input:disabled{opacity:.55}.task-check input:checked+span{text-decoration:line-through;color:#71809a}';document.head.append(style)})();
 

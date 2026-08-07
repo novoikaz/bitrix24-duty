@@ -190,6 +190,15 @@ async function api(req,res,url) {
     if(compensable) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${absenceType} · ${hours} ч · ${v.occurred_on}${compensable?' · учтено в отработке':''}`); return json(res,201,snapshot(actor));
   }
+  const absenceDeleteMatch=url.pathname.match(/^\/api\/absences\/(\d+)\/delete$/);
+  if(req.method==='POST' && absenceDeleteMatch){
+    const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для удаления отсутствия'});
+    const absence=db.prepare('SELECT * FROM absences WHERE id=?').get(Number(absenceDeleteMatch[1])); if(!absence) return json(res,404,{error:'Запись об отсутствии не найдена'});
+    db.prepare('DELETE FROM ledger WHERE reference_id=? AND kind=?').run(absence.id,'absence');
+    db.prepare('DELETE FROM absences WHERE id=?').run(absence.id);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Удалено отсутствие', `${employeeName(absence.employee_id)} · ${absence.occurred_on} · ${absence.hours} ч`);
+    return json(res,200,snapshot(actor));
+  }
   const checklistMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/checklist$/);
   if(req.method==='PATCH' && checklistMatch){
     const actor=await b24User(req); if(!actor) return json(res,401,{error:'Не удалось определить пользователя Bitrix24'});
