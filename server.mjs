@@ -68,6 +68,14 @@ const employeeName = id => db.prepare('SELECT name FROM employees WHERE id=?').g
 const dutyMessage = duty => duty.kind==='office'
   ? `Напоминание: сегодня с 17:00 до 18:00 ваше офисное дежурство. Откройте «Дежурства» и подтвердите готовность.`
   : `Напоминание: сегодня с 09:00 до 18:00 ваше дежурство поддержки. Проверьте обращения клиентов в Bitrix24.`;
+// В уведомлениях Bitrix24 ссылка открывает приложение сразу на экране подтверждения обмена.
+// При смене адреса приложения его можно задать в Render через BITRIX_APP_URL.
+const dutyAppUrl = () => String(process.env.BITRIX_APP_URL || `https://${process.env.BITRIX_DOMAIN || 'novoi.bitrix24.kz'}/marketplace/app/286/`).replace(/\/$/, '') + '/';
+const swapApprover = () => {
+  const configuredId=Number(process.env.SWAP_APPROVER_ID || 0);
+  if(configuredId) return db.prepare('SELECT id,name FROM employees WHERE id=? AND is_active=1').get(configuredId);
+  return db.prepare("SELECT id,name FROM employees WHERE is_active=1 AND name LIKE ? LIMIT 1").get('%Алдияр Байгабулов%');
+};
 async function notifyByWebhook(employeeId,message) {
   const base=String(process.env.BITRIX_IM_WEBHOOK||'').replace(/\/$/,'');
   if(!base) throw new Error('В Render не задан BITRIX_IM_WEBHOOK для отправки уведомлений');
@@ -237,7 +245,21 @@ async function api(req,res,url) {
     const actor=await b24User(req); if(!actor) return json(res,401,{error:'Не удалось определить пользователя Bitrix24'});
     const request=db.prepare('SELECT s.*,d.hours,d.kind,d.starts_on,d.ends_on FROM swap_requests s JOIN duties d ON d.id=s.duty_id WHERE s.id=?').get(Number(swapAction[1]));
     if(!request) return json(res,404,{error:'Заявка на обмен не найдена'}); const action=swapAction[2], actorId=Number(actor.ID);
-    if(action==='accept') { if(actorId!==request.to_employee_id||request.status!=='pending_target') return json(res,403,{error:'Эта заявка недоступна для подтверждения'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('pending_admin',request.id); const actorName=`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim()||'Сотрудник'; await notifyByWebhook(request.from_employee_id,`${actorName} согласился заменить вас на дежурстве: ${request.starts_on} — ${request.ends_on}. Заявка передана редактору на окончательное подтверждение.`); audit(actorName,'Сотрудник согласился на обмен', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
+    if(action==='accept') {
+      if(actorId!==request.to_employee_id||request.status!=='pending_target') return json(res,403,{error:'Эта заявка недоступна для подтверждения'});
+      db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('pending_admin',request.id);
+      const actorName=`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim()||'Сотрудник';
+      await notifyByWebhook(request.from_employee_id,`${actorName} согласился заменить вас на дежурстве: ${request.starts_on} — ${request.ends_on}. Заявка передана редактору на окончательное подтверждение.`);
+      const approver=swapApprover();
+      if(approver) {
+        const fromName=employeeName(request.from_employee_id), toName=employeeName(request.to_employee_id);
+        const kind=request.kind==='office'?'офисного дежурства':'дежурства поддержки';
+        await notifyByWebhook(approver.id,`Требуется подтверждение обмена ${kind}: ${fromName} → ${toName}, ${request.starts_on} — ${request.ends_on}. [URL=${dutyAppUrl()}]Открыть «Дежурства» и подтвердить[/URL]`);
+        audit(actorName,'Обмен передан руководителю на подтверждение', `${fromName} → ${toName} · ${request.starts_on}–${request.ends_on} · ${approver.name}`);
+      } else audit(actorName,'Обмен ожидает подтверждения редактора', `${request.starts_on}–${request.ends_on} · руководитель Алдияр Байгабулов не найден`);
+      audit(actorName,'Сотрудник согласился на обмен', `${request.starts_on}–${request.ends_on}`);
+      return json(res,200,snapshot(actor));
+    }
     if(action==='reject') { if(actorId!==request.to_employee_id&&!actor.app_admin) return json(res,403,{error:'Отклонить заявку может получатель или администратор'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('rejected',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Отклонён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
     if(!canEdit(actor)||request.status!=='pending_admin') return json(res,403,{error:'Подтверждать обмен может только редактор после согласия сотрудника'});
     // Если смена уже подтверждена как компенсирующая, переносим её учёт с прежнего сотрудника на нового.
