@@ -5,6 +5,8 @@ viewDate.setDate(1);
 let calendarEmployeeFilter='';
 
 const $=selector=>document.querySelector(selector);
+// До получения ответа Bitrix24 запрещаем открывать форму добавления: права ещё не подтверждены.
+$('#newDuty').style.display='none';
 const esc=value=>String(value||'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const pad=value=>String(value).padStart(2,'0');
 const dateKey=date=>`${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}`;
