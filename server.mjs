@@ -101,7 +101,7 @@ function snapshot(user=null) {
     allEmployees: canEdit(user) ? db.prepare('SELECT * FROM employees WHERE is_active=1 ORDER BY name').all() : [],
     editors: user?.app_admin ? db.prepare('SELECT id,name,avatar,is_editor FROM employees WHERE is_active=1 ORDER BY name').all() : [],
     duties: db.prepare(`SELECT d.*, e.name, e.avatar FROM duties d JOIN employees e ON e.id=d.employee_id WHERE d.status NOT IN ('cancelled','rejected') ORDER BY d.starts_on`).all(),
-    absences: db.prepare(`SELECT a.*, e.name FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
+    absences: db.prepare(`SELECT a.*, e.name, e.avatar FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
     balances: db.prepare('SELECT id,name,avatar FROM employees WHERE is_active=1 AND is_eligible=1').all().map(e=>({...e, hours:balance(e.id)})),
     audit: db.prepare('SELECT a.*, e.id AS actor_id, e.name AS actor_name, e.avatar AS actor_avatar FROM audit_log a LEFT JOIN employees e ON e.name=a.actor ORDER BY a.id DESC LIMIT 15').all(),
     officeChecklist: db.prepare('SELECT duty_id,item_key,done,updated_at FROM duty_checklist').all(),

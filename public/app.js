@@ -2,6 +2,7 @@ let state;
 let b24Headers={};
 let viewDate=new Date();
 viewDate.setDate(1);
+let calendarEmployeeFilter='';
 
 const $=selector=>document.querySelector(selector);
 const esc=value=>String(value||'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
@@ -28,22 +29,27 @@ function renderOfficeChecklist(duty){
 function addCalendarToolbar(){
   if($('#monthTitle'))return;
   const style=document.createElement('style');
-  style.textContent=`.calendarbar{display:flex;align-items:center;justify-content:space-between;margin:18px 0 10px}.calendarbar h2{margin:0;font-size:17px}.calnav{display:flex;gap:7px}.day.empty{background:#fcfdff}.day.current-week{background:#f4f7ff;box-shadow:inset 0 2px #b8cbef,inset 0 -2px #b8cbef}.delete{margin-left:auto;border:0;background:transparent;color:inherit;padding:0 2px;font-size:16px;line-height:1}.event.admin-event{cursor:pointer}.event.absence{background:#fff0dc;color:#995e0e}.ops{grid-template-columns:repeat(3,1fr);align-items:stretch}.ops .card{height:282px;overflow:hidden}.ops #audit{height:215px;overflow-y:auto;padding-right:7px}.ops #audit::-webkit-scrollbar{width:6px}.ops #audit::-webkit-scrollbar-thumb{background:#d5dceb;border-radius:8px}.office-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}.office-actions button{font-size:11px;padding:6px 8px}.office-actions .ack{background:#3268e9;color:#fff;border-color:#3268e9}.office-actions .decline{color:#a13b3b}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{text-align:left;border-bottom:1px solid #e7ecf4;padding:9px;font-size:13px}`;
+  style.textContent=`.calendarbar{display:flex;align-items:center;justify-content:space-between;margin:18px 0 10px}.calendarbar h2{margin:0;font-size:17px}.calendar-actions,.calnav{display:flex;align-items:center;gap:7px}.calendar-filter{height:38px;max-width:250px;border:1px solid #dce5f2;border-radius:10px;background:#fff;color:#40516d;padding:0 34px 0 12px;font:600 13px/1 system-ui;cursor:pointer}.calendar-filter:focus{outline:0;border-color:#75a0ef;box-shadow:0 0 0 3px #3268e918}.day.empty{background:#fcfdff}.day.current-week{background:#f4f7ff;box-shadow:inset 0 2px #b8cbef,inset 0 -2px #b8cbef}.delete{margin-left:auto;border:0;background:transparent;color:inherit;padding:0 2px;font-size:16px;line-height:1}.event.admin-event{cursor:pointer}.event.absence{background:#fff0dc;color:#995e0e}.ops{display:none!important}.office-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}.office-actions button{font-size:11px;padding:6px 8px}.office-actions .ack{background:#3268e9;color:#fff;border-color:#3268e9}.office-actions .decline{color:#a13b3b}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{text-align:left;border-bottom:1px solid #e7ecf4;padding:9px;font-size:13px}@media(max-width:720px){.calendarbar{align-items:flex-start;gap:10px}.calendar-actions{flex-wrap:wrap;justify-content:flex-end}.calendar-filter{max-width:180px}}`;
   document.head.append(style);
   $('#notice').remove();
   const bar=document.createElement('section');
   bar.className='calendarbar';
-  bar.innerHTML='<h2 id="monthTitle"></h2><div class="calnav"><button id="prevMonth" aria-label="Предыдущий месяц">‹</button><button id="today">Сегодня</button><button id="nextMonth" aria-label="Следующий месяц">›</button></div>';
+  bar.innerHTML='<h2 id="monthTitle"></h2><div class="calendar-actions"><select id="calendarEmployeeFilter" class="calendar-filter" aria-label="Фильтр по сотруднику"></select><div class="calnav"><button id="prevMonth" aria-label="Предыдущий месяц">‹</button><button id="today">Сегодня</button><button id="nextMonth" aria-label="Следующий месяц">›</button></div></div>';
   $('#calendar').before(bar);
   $('#prevMonth').onclick=()=>{viewDate.setMonth(viewDate.getMonth()-1);render()};
   $('#nextMonth').onclick=()=>{viewDate.setMonth(viewDate.getMonth()+1);render()};
   $('#today').onclick=()=>{viewDate=new Date();viewDate.setDate(1);render()};
+  $('#calendarEmployeeFilter').onchange=event=>{calendarEmployeeFilter=event.target.value;render()};
 }
 
 function render(){
   addCalendarToolbar();
   const title=monthName.format(viewDate);
   $('#monthTitle').textContent=title[0].toUpperCase()+title.slice(1);
+  const filter=$('#calendarEmployeeFilter');
+  const people=[...state.employees,...state.absences.map(item=>({id:item.employee_id,name:item.name}))].filter((item,index,list)=>list.findIndex(other=>String(other.id)===String(item.id))===index).sort((a,b)=>a.name.localeCompare(b.name,'ru'));
+  filter.innerHTML=`<option value="">Все сотрудники</option>${people.map(item=>`<option value="${item.id}">${esc(item.name)}</option>`).join('')}`;
+  filter.value=calendarEmployeeFilter;
   const now=new Date();now.setHours(0,0,0,0);
   const weekStart=new Date(now);weekStart.setDate(now.getDate()-((now.getDay()+6)%7));
   const weekEnd=new Date(weekStart);weekEnd.setDate(weekStart.getDate()+6);
@@ -58,9 +64,9 @@ function render(){
   let html=daysOfWeek.map(day=>`<div class="dow">${day}</div>`).join('');
   for(let cell=0;cell<offset;cell++)html+='<div class="day empty"></div>';
   for(let day=1;day<=daysInMonth;day++){
-    const date=`${prefix}-${pad(day)}`,list=state.duties.filter(duty=>duty.starts_on===date),absenceList=state.absences.filter(absence=>absence.occurred_on===date);
+    const date=`${prefix}-${pad(day)}`,list=state.duties.filter(duty=>duty.starts_on===date&&(!calendarEmployeeFilter||String(duty.employee_id)===calendarEmployeeFilter)),absenceList=state.absences.filter(absence=>absence.occurred_on===date&&(!calendarEmployeeFilter||String(absence.employee_id)===calendarEmployeeFilter));
     const current=isCurrentMonth&&date>=weekStartKey&&date<=weekEndKey?' current-week':'';
-    html+=`<div class="day${current}"><span class="date">${day}</span>${list.map(duty=>`<div class="event ${duty.kind} ${state.permissions.canEdit?'admin-event':''}">${ava(duty)}${esc(duty.name)}<b>${duty.kind==='office'?'офис':`${duty.hours} ч`}</b>${state.permissions.canEdit?`<button class="delete" title="Удалить" data-id="${duty.id}">×</button>`:''}</div>`).join('')}${absenceList.map(absence=>`<div class="event absence ${state.permissions.canEdit?'admin-event':''}" title="${esc(absence.note||'Отсутствие')}"><span class="ava">${initials(absence.name||'?')}</span>${esc(absence.name)}<b>${esc(({vacation:'отпуск',sick_leave:'больничный',time_off:'отгул',business_trip:'командировка',personal:'отсутствие',unpaid_leave:'без содержания',other:'другое'})[absence.absence_type]||'отсутствие')} · ${absence.hours} ч</b>${state.permissions.canEdit?`<button class="delete" title="Удалить отсутствие" data-absence-id="${absence.id}">×</button>`:''}</div>`).join('')}</div>`;
+    html+=`<div class="day${current}"><span class="date">${day}</span>${list.map(duty=>`<div class="event ${duty.kind} ${state.permissions.canEdit?'admin-event':''}">${ava(duty)}${esc(duty.name)}<b>${duty.kind==='office'?'офис':`${duty.hours} ч`}</b>${state.permissions.canEdit?`<button class="delete" title="Удалить" data-id="${duty.id}">×</button>`:''}</div>`).join('')}${absenceList.map(absence=>`<div class="event absence ${state.permissions.canEdit?'admin-event':''}" title="${esc(absence.note||'Отсутствие')}">${ava(absence)}${esc(absence.name)}<b>${esc(({vacation:'отпуск',sick_leave:'больничный',time_off:'отгул',business_trip:'командировка',personal:'отсутствие',unpaid_leave:'без содержания',other:'другое'})[absence.absence_type]||'отсутствие')} · ${absence.hours} ч</b>${state.permissions.canEdit?`<button class="delete" title="Удалить отсутствие" data-absence-id="${absence.id}">×</button>`:''}</div>`).join('')}</div>`;
   }
   $('#calendar').innerHTML=html;
   document.querySelectorAll('.delete').forEach(button=>button.onclick=async event=>{event.stopPropagation();if(!confirm('Удалить это дежурство?'))return;const response=await api(`/api/duties/${button.dataset.id}/delete`,{method:'POST'}),data=await response.json();if(!response.ok)return toast(data.error);state=data;toast('Дежурство удалено');render()});
