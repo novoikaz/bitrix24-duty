@@ -23,6 +23,8 @@ if (!db.prepare('PRAGMA table_info(duties)').all().some(column=>column.name==='a
 if (!db.prepare('PRAGMA table_info(duties)').all().some(column=>column.name==='office_status')) db.exec("ALTER TABLE duties ADD COLUMN office_status TEXT NOT NULL DEFAULT 'scheduled'");
 if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='absence_type')) db.exec("ALTER TABLE absences ADD COLUMN absence_type TEXT NOT NULL DEFAULT 'personal'");
 if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='compensable')) db.exec('ALTER TABLE absences ADD COLUMN compensable INTEGER NOT NULL DEFAULT 1');
+if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='bitrix_event_id')) db.exec('ALTER TABLE absences ADD COLUMN bitrix_event_id INTEGER');
+if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='bitrix_sync_error')) db.exec('ALTER TABLE absences ADD COLUMN bitrix_sync_error TEXT');
 if (!db.prepare('PRAGMA table_info(employees)').all().some(column=>column.name==='is_active')) db.exec('ALTER TABLE employees ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1');
 if (!db.prepare('PRAGMA table_info(employees)').all().some(column=>column.name==='is_eligible')) db.exec('ALTER TABLE employees ADD COLUMN is_eligible INTEGER NOT NULL DEFAULT 1');
 if (!db.prepare('PRAGMA table_info(employees)').all().some(column=>column.name==='is_editor')) db.exec('ALTER TABLE employees ADD COLUMN is_editor INTEGER NOT NULL DEFAULT 0');
@@ -60,11 +62,38 @@ async function b24User(req) {
   const profile=await profileReply.json(), admin=await adminReply.json(); const user=profile.result;
   if(!user?.ID) return null; user.app_admin=admin.result===true; authCache.set(token,{user,until:Date.now()+60_000}); return user;
 }
+async function bitrixCall(req,method,params={}){
+  const token=String(req.headers['x-b24-token']||''),domain=String(req.headers['x-b24-domain']||'').toLowerCase();
+  const allowed=String(process.env.BITRIX_DOMAIN||'novoi.bitrix24.kz').toLowerCase();
+  if(!token||domain!==allowed)throw new Error('Нет авторизации Битрикс24 для синхронизации');
+  const response=await fetch(`https://${domain}/rest/${method}.json?auth=${encodeURIComponent(token)}`,{method:'POST',headers:{'content-type':'application/json','accept':'application/json'},body:JSON.stringify(params)});
+  const raw=await response.text();let data;
+  try{data=JSON.parse(raw)}catch{throw new Error(`Битрикс24 вернул некорректный ответ (HTTP ${response.status})`)}
+  if(!response.ok||data.error)throw new Error(data.error_description||data.error||`Ошибка Битрикс24 (HTTP ${response.status})`);
+  return data.result;
+}
 const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || (await b24User(req))?.IS_ADMIN === 'Y');
 const canEdit = user => Boolean(user?.app_admin || db.prepare('SELECT is_editor FROM employees WHERE id=?').get(Number(user?.ID||0))?.is_editor);
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
 const balance = id => db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?').get(id).hours;
 const employeeName = id => db.prepare('SELECT name FROM employees WHERE id=?').get(Number(id))?.name || 'Сотрудник';
+const absenceName = type => ({vacation:'Отпуск',sick_leave:'Больничный',time_off:'Отгул',business_trip:'Командировка',personal:'Личное отсутствие',unpaid_leave:'Без содержания',other:'Отсутствие'}[type]||'Отсутствие');
+const absenceCalendarParams = (absence,autoDetect=false) => ({type:'user',ownerId:Number(absence.employee_id),name:absenceName(absence.absence_type),description:[absence.note,'Добавлено из приложения «Дежурства»'].filter(Boolean).join('\n'),from:absence.occurred_on,to:absence.occurred_on,skip_time:'Y',...(autoDetect?{auto_detect_section:'Y'}:{}),accessibility:'absent',importance:'normal',is_meeting:'N',private_event:'N'});
+async function createBitrixAbsence(req,absence){
+  const eventId=Number(await bitrixCall(req,'calendar.event.add',absenceCalendarParams(absence,true)));
+  if(!eventId)throw new Error('Битрикс24 не вернул номер события календаря');
+  db.prepare('UPDATE absences SET bitrix_event_id=?,bitrix_sync_error=NULL WHERE id=?').run(eventId,absence.id);
+  return eventId;
+}
+async function updateBitrixAbsence(req,previous,current){
+  if(previous.bitrix_event_id&&Number(previous.employee_id)===Number(current.employee_id)){
+    await bitrixCall(req,'calendar.event.update',{id:Number(previous.bitrix_event_id),...absenceCalendarParams(current)});
+    db.prepare('UPDATE absences SET bitrix_event_id=?,bitrix_sync_error=NULL WHERE id=?').run(Number(previous.bitrix_event_id),current.id);
+    return Number(previous.bitrix_event_id);
+  }
+  if(previous.bitrix_event_id)await bitrixCall(req,'calendar.event.delete',{id:Number(previous.bitrix_event_id)});
+  return createBitrixAbsence(req,current);
+}
 const friendlyPeriodRu = (start,end=start) => {
   const months=['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
   const parse=value=>{const [year,month,day]=String(value||'').split('-').map(Number);return {year,month,day}};
@@ -218,13 +247,17 @@ async function api(req,res,url) {
     const compensable=v.compensable===true||v.compensable==='true'||v.compensable==='on';
     const addAbsence=db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note,absence_type,compensable) VALUES (?,?,?,?,?,?)');
     const addLedger=db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)');
+    const createdIds=[];
     db.exec('BEGIN');
     try{
-      for(const date of dates){const r=addAbsence.run(Number(v.employee_id),date,hours,v.note||'',absenceType,compensable?1:0);if(compensable)addLedger.run(Number(v.employee_id),date,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');}
+      for(const date of dates){const r=addAbsence.run(Number(v.employee_id),date,hours,v.note||'',absenceType,compensable?1:0);createdIds.push(Number(r.lastInsertRowid));if(compensable)addLedger.run(Number(v.employee_id),date,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');}
       db.exec('COMMIT');
     }catch(error){db.exec('ROLLBACK');throw error}
+    const syncErrors=[];
+    for(const id of createdIds){const absence=db.prepare('SELECT * FROM absences WHERE id=?').get(id);try{await createBitrixAbsence(req,absence)}catch(error){const message=String(error.message||'Ошибка синхронизации');db.prepare('UPDATE absences SET bitrix_sync_error=? WHERE id=?').run(message,id);syncErrors.push(`${absence.occurred_on}: ${message}`)}}
     const period=dates.length===1?dates[0]:`${dates[0]}–${dates.at(-1)}`;
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${absenceType} · ${hours} ч/день · ${period}${compensable?' · учтено в отработке':''}`); return json(res,201,snapshot(actor));
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${absenceType} · ${hours} ч/день · ${period}${compensable?' · учтено в отработке':''}${syncErrors.length?' · календарь Битрикс24: ошибка':' · добавлено в календарь Битрикс24'}`);
+    const result=snapshot(actor);if(syncErrors.length)result.syncWarning=`Отсутствие сохранено, но не добавлено в график Битрикс24: ${syncErrors[0]}`;return json(res,201,result);
   }
   const absenceEditMatch=url.pathname.match(/^\/api\/absences\/(\d+)$/);
   if(req.method==='PATCH'&&absenceEditMatch){
@@ -240,13 +273,16 @@ async function api(req,res,url) {
       if(compensable)db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(employeeId,dates[0],-hours,'absence',absence.id,v.note||'Отсутствие');
       db.exec('COMMIT');
     }catch(error){db.exec('ROLLBACK');throw error}
+    const current=db.prepare('SELECT * FROM absences WHERE id=?').get(absence.id);let syncWarning='';
+    try{await updateBitrixAbsence(req,absence,current)}catch(error){syncWarning=`Отсутствие изменено, но график Битрикс24 не обновлён: ${error.message}`;db.prepare('UPDATE absences SET bitrix_sync_error=? WHERE id=?').run(String(error.message||'Ошибка синхронизации'),absence.id)}
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Изменено отсутствие',`${employeeName(employeeId)} · ${dates[0]} · ${hours} ч`);
-    return json(res,200,snapshot(actor));
+    const result=snapshot(actor);if(syncWarning)result.syncWarning=syncWarning;return json(res,200,result);
   }
   const absenceDeleteMatch=url.pathname.match(/^\/api\/absences\/(\d+)\/delete$/);
   if(req.method==='POST' && absenceDeleteMatch){
     const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для удаления отсутствия'});
     const absence=db.prepare('SELECT * FROM absences WHERE id=?').get(Number(absenceDeleteMatch[1])); if(!absence) return json(res,404,{error:'Запись об отсутствии не найдена'});
+    if(absence.bitrix_event_id){try{await bitrixCall(req,'calendar.event.delete',{id:Number(absence.bitrix_event_id)})}catch(error){return json(res,502,{error:`Не удалось удалить связанную запись из графика Битрикс24: ${error.message}. Запись в приложении сохранена.`})}}
     db.prepare('DELETE FROM ledger WHERE reference_id=? AND kind=?').run(absence.id,'absence');
     db.prepare('DELETE FROM absences WHERE id=?').run(absence.id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Удалено отсутствие', `${employeeName(absence.employee_id)} · ${absence.occurred_on} · ${absence.hours} ч`);
