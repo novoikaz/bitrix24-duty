@@ -24,6 +24,7 @@ if (!db.prepare('PRAGMA table_info(duties)').all().some(column=>column.name==='o
 if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='absence_type')) db.exec("ALTER TABLE absences ADD COLUMN absence_type TEXT NOT NULL DEFAULT 'personal'");
 if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='compensable')) db.exec('ALTER TABLE absences ADD COLUMN compensable INTEGER NOT NULL DEFAULT 1');
 if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='bitrix_event_id')) db.exec('ALTER TABLE absences ADD COLUMN bitrix_event_id INTEGER');
+if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='bitrix_list_element_id')) db.exec('ALTER TABLE absences ADD COLUMN bitrix_list_element_id INTEGER');
 if (!db.prepare('PRAGMA table_info(absences)').all().some(column=>column.name==='bitrix_sync_error')) db.exec('ALTER TABLE absences ADD COLUMN bitrix_sync_error TEXT');
 if (!db.prepare('PRAGMA table_info(employees)').all().some(column=>column.name==='is_active')) db.exec('ALTER TABLE employees ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1');
 if (!db.prepare('PRAGMA table_info(employees)').all().some(column=>column.name==='is_eligible')) db.exec('ALTER TABLE employees ADD COLUMN is_eligible INTEGER NOT NULL DEFAULT 1');
@@ -84,6 +85,24 @@ async function createBitrixAbsence(req,absence){
   if(!eventId)throw new Error('Битрикс24 не вернул номер события календаря');
   db.prepare('UPDATE absences SET bitrix_event_id=?,bitrix_sync_error=NULL WHERE id=?').run(eventId,absence.id);
   return eventId;
+}
+async function createBitrixAbsenceWorkflowRecord(req,absence){
+  const listId=Number(process.env.BITRIX_ABSENCE_LIST_ID||128);
+  if(!listId)throw new Error('Не задан BITRIX_ABSENCE_LIST_ID');
+  const elementId=Number(await bitrixCall(req,'lists.element.add',{
+    IBLOCK_TYPE_ID:'lists',
+    IBLOCK_ID:listId,
+    ELEMENT_CODE:`duty_absence_${Date.now()}_${Number(absence.employee_id)}`,
+    FIELDS:{
+      NAME:`${absenceName(absence.absence_type)} — ${employeeName(absence.employee_id)} — ${friendlyPeriodRu(absence.starts_on,absence.ends_on)}`,
+      PROPERTY_404:Number(absence.employee_id),
+      PROPERTY_406:absence.starts_on,
+      PROPERTY_408:absence.ends_on,
+      PROPERTY_410:Number(absence.hours)
+    }
+  }));
+  if(!elementId)throw new Error('Битрикс24 не вернул номер записи списка');
+  return elementId;
 }
 async function updateBitrixAbsence(req,previous,current){
   if(previous.bitrix_event_id&&Number(previous.employee_id)===Number(current.employee_id)){
@@ -254,9 +273,16 @@ async function api(req,res,url) {
       db.exec('COMMIT');
     }catch(error){db.exec('ROLLBACK');throw error}
     const syncErrors=[];
-    for(const id of createdIds){const absence=db.prepare('SELECT * FROM absences WHERE id=?').get(id);try{await createBitrixAbsence(req,absence)}catch(error){const message=String(error.message||'Ошибка синхронизации');db.prepare('UPDATE absences SET bitrix_sync_error=? WHERE id=?').run(message,id);syncErrors.push(`${absence.occurred_on}: ${message}`)}}
+    try{
+      const listElementId=await createBitrixAbsenceWorkflowRecord(req,{employee_id:Number(v.employee_id),starts_on:String(v.occurred_on),ends_on:String(v.ends_on||v.occurred_on),hours,absence_type:absenceType,note:v.note||''});
+      for(const id of createdIds)db.prepare('UPDATE absences SET bitrix_list_element_id=?,bitrix_sync_error=NULL WHERE id=?').run(listElementId,id);
+    }catch(error){
+      const message=String(error.message||'Ошибка синхронизации');
+      for(const id of createdIds)db.prepare('UPDATE absences SET bitrix_sync_error=? WHERE id=?').run(message,id);
+      syncErrors.push(message);
+    }
     const period=dates.length===1?dates[0]:`${dates[0]}–${dates.at(-1)}`;
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${absenceType} · ${hours} ч/день · ${period}${compensable?' · учтено в отработке':''}${syncErrors.length?' · календарь Битрикс24: ошибка':' · добавлено в календарь Битрикс24'}`);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${absenceType} · ${hours} ч/день · ${period}${compensable?' · учтено в отработке':''}${syncErrors.length?' · график отсутствий Битрикс24: ошибка':' · добавлено в график отсутствий Битрикс24'}`);
     const result=snapshot(actor);if(syncErrors.length)result.syncWarning=`Отсутствие сохранено, но не добавлено в график Битрикс24: ${syncErrors[0]}`;return json(res,201,result);
   }
   const absenceEditMatch=url.pathname.match(/^\/api\/absences\/(\d+)$/);
