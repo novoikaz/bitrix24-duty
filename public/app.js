@@ -22,7 +22,24 @@ function groupExact(items,key){
   items.forEach(item=>{const value=key(item),group=groups.get(value);if(group)group._ids.push(item.id);else groups.set(value,{...item,_ids:[item.id]})});
   return [...groups.values()].map(item=>({...item,_count:item._ids.length}));
 }
-function person(duty){return duty?`<div class="person">${ava(duty)}<div><b>${esc(duty.name)}</b><br><span class="sub">${duty.starts_on}–${duty.ends_on}</span></div><span class="right">${duty.hours?`${duty.hours} ч`:'офис'}</span></div>`:'<span class="sub">Не назначен</span>'}
+function friendlyPeriod(start,end){
+  const months=['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+  const parse=value=>{const [year,month,day]=String(value||'').split('-').map(Number);return {year,month,day}};
+  const from=parse(start),to=parse(end||start);
+  if(!from.year||!from.month||!from.day)return `${start||''}${end&&end!==start?`–${end}`:''}`;
+  if(from.year===to.year&&from.month===to.month&&from.day===to.day)return `${from.day} ${months[from.month-1]}`;
+  if(from.year===to.year&&from.month===to.month)return `${from.day}–${to.day} ${months[from.month-1]}`;
+  if(from.year===to.year)return `${from.day} ${months[from.month-1]} – ${to.day} ${months[to.month-1]}`;
+  return `${from.day} ${months[from.month-1]} ${from.year} – ${to.day} ${months[to.month-1]} ${to.year}`;
+}
+function friendlyDateTime(value){
+  const match=String(value||'').match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))/);
+  return match?`${friendlyPeriod(match[1],match[1])}, ${match[2]}`:friendlyPeriod(value,value);
+}
+function friendlyTextDates(value){
+  return String(value||'').replace(/(\d{4}-\d{2}-\d{2})\s*[–—]\s*(\d{4}-\d{2}-\d{2})/g,(_,start,end)=>friendlyPeriod(start,end)).replace(/\d{4}-\d{2}-\d{2}/g,date=>friendlyPeriod(date,date));
+}
+function person(duty){return duty?`<div class="person">${ava(duty)}<div><b>${esc(duty.name)}</b><br><span class="sub">${friendlyPeriod(duty.starts_on,duty.ends_on)}</span></div><span class="right">${duty.hours?`${duty.hours} ч`:'офис'}</span></div>`:'<span class="sub">Не назначен</span>'}
 const officeChecklistItems=[['trash','Убрать мусор'],['surfaces','Протереть поверхности'],['equipment','Выключить технику и свет'],['windows','Проверить окна и двери']];
 function renderOfficeChecklist(duty){
   const card=document.querySelector('.ops .card:first-child'); if(!card)return;
@@ -103,7 +120,7 @@ function render(){
   }
   $('#support').innerHTML=person(support||nextSupport);
   renderOfficeChecklist(shownOffice);
-  $('#audit').innerHTML=state.audit.length?state.audit.map(item=>{const author={name:item.actor_name||item.actor||'Система',avatar:item.actor_avatar||''};return `<div class="audit-entry">${ava(author)}<div><strong>${esc(item.action)}</strong><span class="audit-author">Автор: ${esc(author.name)}</span><span class="audit-detail">${esc(item.detail)}</span><small>${esc(item.occurred_at)}</small></div></div>`}).join(''):'Пока нет изменений';
+  $('#audit').innerHTML=state.audit.length?state.audit.map(item=>{const author={name:item.actor_name||item.actor||'Система',avatar:item.actor_avatar||''};return `<div class="audit-entry">${ava(author)}<div><strong>${esc(item.action)}</strong><span class="audit-author">Автор: ${esc(author.name)}</span><span class="audit-detail">${esc(friendlyTextDates(item.detail))}</span><small>${esc(friendlyDateTime(item.occurred_at))}</small></div></div>`}).join(''):'Пока нет изменений';
   const admin=state.permissions.canEdit;$('#mode').textContent=admin?'Администратор портала':'Режим просмотра';
   document.querySelectorAll('.admin').forEach(item=>item.style.display=admin?'inline-block':'none');
   const employeeOptions=state.employees.map(item=>`<option value="${item.id}">${esc(item.name)}</option>`).join('');

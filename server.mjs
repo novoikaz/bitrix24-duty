@@ -65,6 +65,16 @@ const canEdit = user => Boolean(user?.app_admin || db.prepare('SELECT is_editor 
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
 const balance = id => db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?').get(id).hours;
 const employeeName = id => db.prepare('SELECT name FROM employees WHERE id=?').get(Number(id))?.name || 'Сотрудник';
+const friendlyPeriodRu = (start,end=start) => {
+  const months=['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+  const parse=value=>{const [year,month,day]=String(value||'').split('-').map(Number);return {year,month,day}};
+  const from=parse(start),to=parse(end);
+  if(!from.year||!from.month||!from.day)return `${start||''}${end&&end!==start?`–${end}`:''}`;
+  if(from.year===to.year&&from.month===to.month&&from.day===to.day)return `${from.day} ${months[from.month-1]}`;
+  if(from.year===to.year&&from.month===to.month)return `${from.day}–${to.day} ${months[from.month-1]}`;
+  if(from.year===to.year)return `${from.day} ${months[from.month-1]} – ${to.day} ${months[to.month-1]}`;
+  return `${from.day} ${months[from.month-1]} ${from.year} – ${to.day} ${months[to.month-1]} ${to.year}`;
+};
 const dutyMessage = duty => duty.kind==='office'
   ? `Напоминание: сегодня с 17:00 до 18:00 ваше офисное дежурство. Откройте «Дежурства» и подтвердите готовность.`
   : `Напоминание: сегодня с 09:00 до 18:00 ваше дежурство поддержки. Проверьте обращения клиентов в Bitrix24.`;
@@ -272,7 +282,7 @@ async function api(req,res,url) {
     db.prepare('INSERT INTO swap_requests(duty_id,from_employee_id,to_employee_id,note) VALUES (?,?,?,?)').run(dutyId,currentId,targetId,String(v.note||''));
     const actorName=`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim()||'Сотрудник';
     const dutyKind=duty.kind==='office'?'офисное дежурство':'дежурство поддержки';
-    await notifyByWebhook(targetId,`${actorName} предлагает вам заменить его на ${dutyKind}: ${duty.starts_on} — ${duty.ends_on}.${v.note?` Комментарий: ${String(v.note)}`:''} Откройте «Дежурства», чтобы согласиться или отклонить предложение.`);
+    await notifyByWebhook(targetId,`${actorName} предлагает вам заменить его на ${dutyKind}: ${friendlyPeriodRu(duty.starts_on,duty.ends_on)}.${v.note?` Комментарий: ${String(v.note)}`:''} Откройте «Дежурства», чтобы согласиться или отклонить предложение.`);
     audit(actorName,'Предложен обмен дежурством', `${duty.starts_on}–${duty.ends_on}`); return json(res,201,snapshot(actor));
   }
   const swapAction=url.pathname.match(/^\/api\/swaps\/(\d+)\/(accept|reject|approve)$/);
@@ -284,12 +294,12 @@ async function api(req,res,url) {
       if(actorId!==request.to_employee_id||request.status!=='pending_target') return json(res,403,{error:'Эта заявка недоступна для подтверждения'});
       db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('pending_admin',request.id);
       const actorName=`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim()||'Сотрудник';
-      await notifyByWebhook(request.from_employee_id,`${actorName} согласился заменить вас на дежурстве: ${request.starts_on} — ${request.ends_on}. Заявка передана редактору на окончательное подтверждение.`);
+      await notifyByWebhook(request.from_employee_id,`${actorName} согласился заменить вас на дежурстве: ${friendlyPeriodRu(request.starts_on,request.ends_on)}. Заявка передана редактору на окончательное подтверждение.`);
       const approver=swapApprover();
       if(approver) {
         const fromName=employeeName(request.from_employee_id), toName=employeeName(request.to_employee_id);
         const kind=request.kind==='office'?'офисного дежурства':'дежурства поддержки';
-        await notifyByWebhook(approver.id,`Требуется подтверждение обмена ${kind}: ${fromName} → ${toName}, ${request.starts_on} — ${request.ends_on}. [URL=${dutyAppUrl()}]Открыть «Дежурства» и подтвердить[/URL]`);
+        await notifyByWebhook(approver.id,`Требуется подтверждение обмена ${kind}: ${fromName} → ${toName}, ${friendlyPeriodRu(request.starts_on,request.ends_on)}. [URL=${dutyAppUrl()}]Открыть «Дежурства» и подтвердить[/URL]`);
         audit(actorName,'Обмен передан руководителю на подтверждение', `${fromName} → ${toName} · ${request.starts_on}–${request.ends_on} · ${approver.name}`);
       } else audit(actorName,'Обмен ожидает подтверждения редактора', `${request.starts_on}–${request.ends_on} · руководитель Алдияр Байгабулов не найден`);
       audit(actorName,'Сотрудник согласился на обмен', `${request.starts_on}–${request.ends_on}`);
