@@ -85,6 +85,14 @@ async function notifyByWebhook(employeeId,message) {
   if(!response.ok||data.error) throw new Error(data.error_description||data.error||'Bitrix24 не принял уведомление');
 }
 function almatyNow(){const formatter=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Almaty',year:'numeric',month:'2-digit',day:'2-digit',weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});const values=Object.fromEntries(formatter.formatToParts(new Date()).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));return {date:`${values.year}-${values.month}-${values.day}`,weekday:values.weekday,hour:Number(values.hour),minute:Number(values.minute)};}
+function absenceDates(startsOn,endsOn){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(startsOn)||!/^\d{4}-\d{2}-\d{2}$/.test(endsOn)) return [];
+  const start=new Date(`${startsOn}T00:00:00Z`),end=new Date(`${endsOn}T00:00:00Z`);
+  if(!Number.isFinite(start.getTime())||!Number.isFinite(end.getTime())||end<start)return [];
+  const dates=[];
+  for(let date=start;date<=end&&dates.length<=366;date=new Date(date.getTime()+86_400_000))dates.push(date.toISOString().slice(0,10));
+  return dates.length<=366?dates:[];
+}
 async function sendDueReminders(kind,now=almatyNow()){
   const scheduledHour=kind==='office'?14:6;
   const startHour=kind==='office'?17:9;
@@ -191,12 +199,18 @@ async function api(req,res,url) {
   }
   if (req.method==='POST' && url.pathname==='/api/absences') {
     const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для редактирования'});
-    const v=await body(req); const hours=Number(v.hours), absenceType=String(v.absence_type||'personal');
-    if(!Number(v.employee_id)||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(Number(v.employee_id))||!v.occurred_on||!hours||hours>720||!['vacation','sick_leave','time_off','business_trip','personal','unpaid_leave','other'].includes(absenceType)) return json(res,422,{error:'Выберите действующего сотрудника и проверьте данные отсутствия'});
+    const v=await body(req); const hours=Number(v.hours), absenceType=String(v.absence_type||'personal'),dates=absenceDates(String(v.occurred_on||''),String(v.ends_on||v.occurred_on||''));
+    if(!Number(v.employee_id)||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(Number(v.employee_id))||!dates.length||!hours||hours>24||!['vacation','sick_leave','time_off','business_trip','personal','unpaid_leave','other'].includes(absenceType)) return json(res,422,{error:'Выберите сотрудника, корректный период до 366 дней и часы отсутствия за один день'});
     const compensable=v.compensable===true||v.compensable==='true'||v.compensable==='on';
-    const r=db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note,absence_type,compensable) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,hours,v.note||'',absenceType,compensable?1:0);
-    if(compensable) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(Number(v.employee_id),v.occurred_on,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${absenceType} · ${hours} ч · ${v.occurred_on}${compensable?' · учтено в отработке':''}`); return json(res,201,snapshot(actor));
+    const addAbsence=db.prepare('INSERT INTO absences (employee_id,occurred_on,hours,note,absence_type,compensable) VALUES (?,?,?,?,?,?)');
+    const addLedger=db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)');
+    db.exec('BEGIN');
+    try{
+      for(const date of dates){const r=addAbsence.run(Number(v.employee_id),date,hours,v.note||'',absenceType,compensable?1:0);if(compensable)addLedger.run(Number(v.employee_id),date,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');}
+      db.exec('COMMIT');
+    }catch(error){db.exec('ROLLBACK');throw error}
+    const period=dates.length===1?dates[0]:`${dates[0]}–${dates.at(-1)}`;
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Добавлено отсутствие', `${absenceType} · ${hours} ч/день · ${period}${compensable?' · учтено в отработке':''}`); return json(res,201,snapshot(actor));
   }
   const absenceDeleteMatch=url.pathname.match(/^\/api\/absences\/(\d+)\/delete$/);
   if(req.method==='POST' && absenceDeleteMatch){

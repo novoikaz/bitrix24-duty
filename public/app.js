@@ -31,8 +31,9 @@ function renderOfficeChecklist(duty){
 function addCalendarToolbar(){
   if($('#monthTitle'))return;
   const style=document.createElement('style');
-  style.textContent=`.calendarbar{display:flex;align-items:center;justify-content:space-between;margin:18px 0 10px}.calendarbar h2{margin:0;font-size:17px}.calendar-actions,.calnav{display:flex;align-items:center;gap:7px}.calendar-filter{height:38px;max-width:250px;border:1px solid #dce5f2;border-radius:10px;background:#fff;color:#40516d;padding:0 34px 0 12px;font:600 13px/1 system-ui;cursor:pointer}.calendar-filter:focus{outline:0;border-color:#75a0ef;box-shadow:0 0 0 3px #3268e918}.day.empty{background:#fcfdff}.day.current-week{background:#f4f7ff;box-shadow:inset 0 2px #b8cbef,inset 0 -2px #b8cbef}.delete{margin-left:auto;border:0;background:transparent;color:inherit;padding:0 2px;font-size:16px;line-height:1}.event.admin-event{cursor:pointer}.event.absence{background:#fff0dc;color:#995e0e}.ops{display:none!important}.office-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}.office-actions button{font-size:11px;padding:6px 8px}.office-actions .ack{background:#3268e9;color:#fff;border-color:#3268e9}.office-actions .decline{color:#a13b3b}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{text-align:left;border-bottom:1px solid #e7ecf4;padding:9px;font-size:13px}@media(max-width:720px){.calendarbar{align-items:flex-start;gap:10px}.calendar-actions{flex-wrap:wrap;justify-content:flex-end}.calendar-filter{max-width:180px}}`;
+  style.textContent=`.layout{width:100%;max-width:100%;grid-template-columns:220px minmax(0,1fr)!important;overflow-x:hidden}.main{min-width:0;max-width:100%!important}.grid{min-width:0;grid-template-columns:repeat(7,minmax(0,1fr))!important}.day,.dow{min-width:0}.event{min-width:0}.event b{overflow:hidden;text-overflow:ellipsis}.calendarbar{display:flex;align-items:center;justify-content:space-between;margin:18px 0 10px}.calendarbar h2{margin:0;font-size:17px}.calendar-actions,.calnav{display:flex;align-items:center;gap:7px}.calendar-filter{height:38px;max-width:250px;border:1px solid #dce5f2;border-radius:10px;background:#fff;color:#40516d;padding:0 34px 0 12px;font:600 13px/1 system-ui;cursor:pointer}.calendar-filter:focus{outline:0;border-color:#75a0ef;box-shadow:0 0 0 3px #3268e918}.day.empty{background:#fcfdff}.day.current-week{background:#f4f7ff;box-shadow:inset 0 2px #b8cbef,inset 0 -2px #b8cbef}.delete{margin-left:auto;border:0;background:transparent;color:inherit;padding:0 2px;font-size:16px;line-height:1}.event.admin-event{cursor:pointer}.event.absence{background:#fff0dc;color:#995e0e}.ops{display:none!important}.office-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}.office-actions button{font-size:11px;padding:6px 8px}.office-actions .ack{background:#3268e9;color:#fff;border-color:#3268e9}.office-actions .decline{color:#a13b3b}table{border-collapse:collapse;width:100%;margin-top:12px}th,td{text-align:left;border-bottom:1px solid #e7ecf4;padding:9px;font-size:13px}@media(max-width:1100px){.main{padding-left:22px!important;padding-right:22px!important}.event{padding-left:4px;padding-right:4px;gap:3px}.event .ava{width:18px;height:18px}}@media(max-width:720px){.layout{grid-template-columns:1fr!important}.calendarbar{align-items:flex-start;gap:10px}.calendar-actions{flex-wrap:wrap;justify-content:flex-end}.calendar-filter{max-width:180px}}`;
   document.head.append(style);
+  const modalStyle=document.createElement('style');modalStyle.textContent='.modal{max-height:calc(100vh - 40px);overflow-y:auto}';document.head.append(modalStyle);
   $('#notice').remove();
   const bar=document.createElement('section');
   bar.className='calendarbar';
@@ -115,17 +116,28 @@ function setAddMode(mode){
   dutyPanel.querySelector('[name=starts_on]').required=duty;
   dutyPanel.querySelector('[name=ends_on]').required=duty;
   absencePanel.querySelector('[name=occurred_on]').required=!duty;
+  absencePanel.querySelector('[name=ends_on]').required=!duty;
   absencePanel.querySelector('[name=hours]').required=!duty;
   document.querySelectorAll('[data-add-mode]').forEach(button=>button.classList.toggle('on',button.dataset.addMode===mode));
   $('#addTitle').textContent=duty?'Добавить дежурство':'Добавить отсутствие';
   $('#addIntro').textContent=duty?'Назначьте сотрудника в график. Режим «Списать долг» применяется после подтверждения выполнения.':'Зафиксируйте отсутствие: при включённом учёте часы попадут в долг по дежурствам.';
   $('#addSubmit').textContent=duty?'Добавить дежурство':'Сохранить отсутствие';
 }
-$('#newDuty').onclick=()=>{const value=dateKey(viewDate);$('#dutyFields [name=starts_on]').value=value;$('#dutyFields [name=ends_on]').value=value;$('#absenceFields [name=occurred_on]').value=value;setAddMode('duty');$('#modal').classList.add('open')};
+function addAbsencePeriodField(){
+  const start=$('#absenceFields [name=occurred_on]'),field=start.closest('.field');
+  field.querySelector('label').textContent='Начало отсутствия';
+  $('#absenceFields [name=hours]').closest('.field').querySelector('label').textContent='Часов отсутствия в день';
+  const endField=document.createElement('div');endField.className='field';
+  endField.innerHTML='<label>Окончание отсутствия</label><input type="date" name="ends_on" disabled>';
+  field.after(endField);
+  start.addEventListener('change',()=>{const end=endField.querySelector('input');if(!end.value||end.value<start.value)end.value=start.value});
+}
+addAbsencePeriodField();
+$('#newDuty').onclick=()=>{const value=dateKey(viewDate);$('#dutyFields [name=starts_on]').value=value;$('#dutyFields [name=ends_on]').value=value;$('#absenceFields [name=occurred_on]').value=value;$('#absenceFields [name=ends_on]').value=value;setAddMode('duty');$('#modal').classList.add('open')};
 $('#close').onclick=()=>$('#modal').classList.remove('open');
 document.querySelectorAll('[data-add-mode]').forEach(button=>button.onclick=()=>setAddMode(button.dataset.addMode));
-$('#absenceFields [name=absence_type]').onchange=event=>{$('#absenceFields [name=compensable]').checked=!['vacation','sick_leave','business_trip'].includes(event.target.value)};
-$('#form').onsubmit=async event=>{event.preventDefault();const value=Object.fromEntries(new FormData(event.target));const path=addMode==='duty'?'/api/duties':'/api/absences';const response=await api(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(value)}),data=await response.json();if(!response.ok)return toast(data.error);state=data;$('#modal').classList.remove('open');toast(addMode==='duty'?'Дежурство добавлено':'Отсутствие зафиксировано');render()};
+$('#absenceFields [name=absence_type]').onchange=event=>{const reportOnly=['vacation','sick_leave','business_trip','unpaid_leave'].includes(event.target.value);$('#absenceFields [name=compensable]').checked=!reportOnly;const hours=$('#absenceFields [name=hours]');if(reportOnly&&!hours.value)hours.value=8};
+$('#form').onsubmit=async event=>{event.preventDefault();const value=Object.fromEntries(new FormData(event.target));if(addMode==='absence'&&value.ends_on<value.occurred_on)return toast('Дата окончания не может быть раньше даты начала');const path=addMode==='duty'?'/api/duties':'/api/absences';const response=await api(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(value)}),data=await response.json();if(!response.ok)return toast(data.error);state=data;$('#modal').classList.remove('open');toast(addMode==='duty'?'Дежурство добавлено':value.ends_on!==value.occurred_on?'Период отсутствия добавлен':'Отсутствие зафиксировано');render()};
 setAddMode('duty');
 document.querySelectorAll('.check i').forEach(item=>item.onclick=()=>item.classList.toggle('ok'));
 function start(){if(!window.BX24)return load();BX24.init(async()=>{const auth=BX24.getAuth();if(auth?.access_token){b24Headers={'x-b24-token':auth.access_token,'x-b24-domain':auth.domain};await api('/api/bitrix/sync',{method:'POST'})}load()})}
