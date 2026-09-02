@@ -105,7 +105,7 @@ async function bitrixCall(req,method,params={}){
 const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || (await b24User(req))?.IS_ADMIN === 'Y');
 const canEdit = user => Boolean(user?.app_admin || db.prepare('SELECT is_editor FROM employees WHERE id=?').get(Number(user?.ID||0))?.is_editor);
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
-const balance = id => Math.min(0,Number(db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?').get(id).hours));
+const balance = id => db.prepare('SELECT hours FROM ledger WHERE employee_id=? ORDER BY occurred_on,id').all(id).reduce((current,item)=>Math.min(0,current+Number(item.hours)),0);
 const dutyHoursLimit = duty => duty.kind==='office'?0:(duty.starts_on===duty.ends_on?2:4);
 function reconcileEmployeeDutyCredits(employeeId){
   db.prepare("DELETE FROM ledger WHERE employee_id=? AND kind='support'").run(employeeId);
@@ -121,7 +121,7 @@ function reconcileEmployeeDutyCredits(employeeId){
   let runningBalance=0;
   const add=db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)');
   for(const event of events){
-    if(event.eventType==='ledger'){runningBalance+=Number(event.hours);continue;}
+    if(event.eventType==='ledger'){runningBalance=Math.min(0,runningBalance+Number(event.hours));continue;}
     const credited=Math.min(Number(event.hours),Math.max(0,-runningBalance));
     if(credited>0){add.run(employeeId,event.ends_on,credited,'support',event.id,'Компенсация существующего долга подтверждённым дежурством');runningBalance+=credited;}
   }
@@ -137,6 +137,10 @@ if (!db.prepare("SELECT 1 FROM meta WHERE key='no_positive_duty_balance_v1'").ge
 if (!db.prepare("SELECT 1 FROM meta WHERE key='chronological_duty_compensation_v1'").get()) {
   for(const employee of db.prepare('SELECT id FROM employees').all())reconcileEmployeeDutyCredits(employee.id);
   db.prepare("INSERT INTO meta(key,value) VALUES ('chronological_duty_compensation_v1','1')").run();
+}
+if (!db.prepare("SELECT 1 FROM meta WHERE key='no_positive_carryover_v1'").get()) {
+  for(const employee of db.prepare('SELECT id FROM employees').all())reconcileEmployeeDutyCredits(employee.id);
+  db.prepare("INSERT INTO meta(key,value) VALUES ('no_positive_carryover_v1','1')").run();
 }
 const employeeName = id => db.prepare('SELECT name FROM employees WHERE id=?').get(Number(id))?.name || 'Сотрудник';
 const absenceName = type => ({vacation:'Отпуск',sick_leave:'Больничный',time_off:'Отгул',business_trip:'Командировка',personal:'Личное отсутствие',unpaid_leave:'Без содержания',other:'Отсутствие'}[type]||'Отсутствие');
