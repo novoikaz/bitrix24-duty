@@ -54,8 +54,8 @@ if (!db.prepare("SELECT 1 FROM meta WHERE key='single_support_day_two_hours_v1'"
   db.exec("UPDATE ledger SET hours=2 WHERE kind='support' AND hours>2 AND reference_id IN (SELECT id FROM duties WHERE kind IN ('support','holiday') AND starts_on=ends_on)");
   db.prepare("INSERT INTO meta(key,value) VALUES ('single_support_day_two_hours_v1','1')").run();
 }
-// Компенсирующее дежурство учитывается полностью. Если часов больше долга,
-// остаток становится положительным и сохраняется в пользу сотрудника.
+// Историческая миграция старого правила. Ниже новая миграция пересчитает эти
+// записи по действующему правилу «компенсация только до нуля».
 if (!db.prepare("SELECT 1 FROM meta WHERE key='positive_compensation_balance_v1'").get()) {
   db.exec('BEGIN');
   try {
@@ -105,14 +105,22 @@ async function bitrixCall(req,method,params={}){
 const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || (await b24User(req))?.IS_ADMIN === 'Y');
 const canEdit = user => Boolean(user?.app_admin || db.prepare('SELECT is_editor FROM employees WHERE id=?').get(Number(user?.ID||0))?.is_editor);
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
-const balance = id => db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?').get(id).hours;
+const balance = id => Math.min(0,Number(db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?').get(id).hours));
 const dutyHoursLimit = duty => duty.kind==='office'?0:(duty.starts_on===duty.ends_on?2:4);
+function reconcileEmployeeDutyCredits(employeeId){
+  db.prepare("DELETE FROM ledger WHERE employee_id=? AND kind='support'").run(employeeId);
+  let debt=Math.max(0,-Number(balance(employeeId)));
+  const duties=db.prepare("SELECT * FROM duties WHERE employee_id=? AND status='confirmed' AND kind!='office' AND accounting_mode='compensate' ORDER BY ends_on,id").all(employeeId);
+  const add=db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)');
+  for(const duty of duties){const credited=Math.min(Number(duty.hours),debt);if(credited>0)add.run(employeeId,duty.ends_on,credited,'support',duty.id,'Компенсация долга подтверждённым дежурством');debt-=credited;if(debt<=0)break;}
+}
 function reconcileDutyCredit(duty){
-  db.prepare("DELETE FROM ledger WHERE reference_id=? AND kind='support'").run(duty.id);
-  if(duty.status!=='confirmed'||duty.kind==='office'||duty.accounting_mode!=='compensate')return 0;
-  const credited=Number(duty.hours);
-  if(credited>0)db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(duty.employee_id,duty.ends_on,credited,'support',duty.id,'Подтверждённое компенсирующее дежурство');
-  return credited;
+  reconcileEmployeeDutyCredits(duty.employee_id);
+  return Number(db.prepare("SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=? AND reference_id=? AND kind='support'").get(duty.employee_id,duty.id).hours);
+}
+if (!db.prepare("SELECT 1 FROM meta WHERE key='no_positive_duty_balance_v1'").get()) {
+  for(const employee of db.prepare('SELECT id FROM employees').all())reconcileEmployeeDutyCredits(employee.id);
+  db.prepare("INSERT INTO meta(key,value) VALUES ('no_positive_duty_balance_v1','1')").run();
 }
 const employeeName = id => db.prepare('SELECT name FROM employees WHERE id=?').get(Number(id))?.name || 'Сотрудник';
 const absenceName = type => ({vacation:'Отпуск',sick_leave:'Больничный',time_off:'Отгул',business_trip:'Командировка',personal:'Личное отсутствие',unpaid_leave:'Без содержания',other:'Отсутствие'}[type]||'Отсутствие');
@@ -296,7 +304,7 @@ async function api(req,res,url) {
   if (req.method==='POST' && deleteMatch) {
     const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для редактирования'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(deleteMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
-    db.prepare('DELETE FROM ledger WHERE reference_id=? AND kind=?').run(duty.id,'support'); db.prepare('DELETE FROM duties WHERE id=?').run(duty.id);
+    db.prepare('DELETE FROM duties WHERE id=?').run(duty.id); reconcileEmployeeDutyCredits(duty.employee_id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Удалено дежурство', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,snapshot(actor));
   }
   if (req.method==='POST' && url.pathname==='/api/absences') {
@@ -312,6 +320,7 @@ async function api(req,res,url) {
       for(const date of dates){const r=addAbsence.run(Number(v.employee_id),date,hours,v.note||'',absenceType,compensable?1:0);createdIds.push(Number(r.lastInsertRowid));if(compensable)addLedger.run(Number(v.employee_id),date,-hours,'absence',r.lastInsertRowid,v.note||'Отсутствие');}
       db.exec('COMMIT');
     }catch(error){db.exec('ROLLBACK');throw error}
+    reconcileEmployeeDutyCredits(Number(v.employee_id));
     const syncErrors=[];
     try{
       const listElementId=await createBitrixAbsenceWorkflowRecord(req,{employee_id:Number(v.employee_id),starts_on:String(v.occurred_on),ends_on:String(v.ends_on||v.occurred_on),hours,absence_type:absenceType,note:v.note||''});
@@ -339,6 +348,7 @@ async function api(req,res,url) {
       if(compensable)db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(employeeId,dates[0],-hours,'absence',absence.id,v.note||'Отсутствие');
       db.exec('COMMIT');
     }catch(error){db.exec('ROLLBACK');throw error}
+    reconcileEmployeeDutyCredits(absence.employee_id);if(employeeId!==absence.employee_id)reconcileEmployeeDutyCredits(employeeId);
     const current=db.prepare('SELECT * FROM absences WHERE id=?').get(absence.id);let syncWarning='';
     try{await updateBitrixAbsence(req,absence,current)}catch(error){syncWarning=`Отсутствие изменено, но график Битрикс24 не обновлён: ${error.message}`;db.prepare('UPDATE absences SET bitrix_sync_error=? WHERE id=?').run(String(error.message||'Ошибка синхронизации'),absence.id)}
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Изменено отсутствие',`${employeeName(employeeId)} · ${dates[0]} · ${hours} ч`);
@@ -351,6 +361,7 @@ async function api(req,res,url) {
     if(absence.bitrix_event_id){try{await bitrixCall(req,'calendar.event.delete',{id:Number(absence.bitrix_event_id)})}catch(error){return json(res,502,{error:`Не удалось удалить связанную запись из графика Битрикс24: ${error.message}. Запись в приложении сохранена.`})}}
     db.prepare('DELETE FROM ledger WHERE reference_id=? AND kind=?').run(absence.id,'absence');
     db.prepare('DELETE FROM absences WHERE id=?').run(absence.id);
+    reconcileEmployeeDutyCredits(absence.employee_id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Удалено отсутствие', `${employeeName(absence.employee_id)} · ${absence.occurred_on} · ${absence.hours} ч`);
     return json(res,200,snapshot(actor));
   }
@@ -411,6 +422,7 @@ async function api(req,res,url) {
     // Если смена уже подтверждена как компенсирующая, переносим её учёт с прежнего сотрудника на нового.
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(request.duty_id);
     db.prepare('UPDATE duties SET employee_id=? WHERE id=?').run(request.to_employee_id,request.duty_id);
+    reconcileEmployeeDutyCredits(duty.employee_id);
     reconcileDutyCredit({...duty,employee_id:request.to_employee_id});
     db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('approved',request.id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor));
