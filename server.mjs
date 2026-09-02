@@ -47,6 +47,13 @@ if (!db.prepare("SELECT 1 FROM meta WHERE key='negative_balance_v1'").get()) {
   for(const employee of employees){const value=Number(current.get(employee.id).hours);if(value)adjust.run(employee.id,new Date().toISOString().slice(0,10),-value,'opening_reset','Стартовая корректировка баланса: 0 ч');}
   db.prepare("INSERT INTO meta(key,value) VALUES ('negative_balance_v1','1')").run();
 }
+// Ранее отдельные суббота и воскресенье сохранялись как 4 часа каждое.
+// По действующему правилу один выходной равен 2 часам, весь уикенд — 4 часам.
+if (!db.prepare("SELECT 1 FROM meta WHERE key='single_support_day_two_hours_v1'").get()) {
+  db.exec("UPDATE duties SET hours=2 WHERE kind IN ('support','holiday') AND starts_on=ends_on AND hours>2");
+  db.exec("UPDATE ledger SET hours=2 WHERE kind='support' AND hours>2 AND reference_id IN (SELECT id FROM duties WHERE kind IN ('support','holiday') AND starts_on=ends_on)");
+  db.prepare("INSERT INTO meta(key,value) VALUES ('single_support_day_two_hours_v1','1')").run();
+}
 
 const json = (res, status, value) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); };
 const body = req => new Promise((resolve,reject) => { let s=''; req.on('data', x=>s+=x); req.on('end',()=>{try{resolve(s?JSON.parse(s):{})}catch{reject(new Error('Некорректный JSON'))}}); });
@@ -77,6 +84,7 @@ const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || 
 const canEdit = user => Boolean(user?.app_admin || db.prepare('SELECT is_editor FROM employees WHERE id=?').get(Number(user?.ID||0))?.is_editor);
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
 const balance = id => db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?').get(id).hours;
+const dutyHoursLimit = duty => duty.kind==='office'?0:(duty.starts_on===duty.ends_on?2:4);
 function reconcileDutyCredit(duty){
   db.prepare("DELETE FROM ledger WHERE reference_id=? AND kind='support'").run(duty.id);
   if(duty.status!=='confirmed'||duty.kind==='office'||duty.accounting_mode!=='compensate')return 0;
@@ -224,9 +232,9 @@ async function api(req,res,url) {
     const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для изменения графика'});
     const v=await body(req); if(!['office','support','holiday'].includes(v.kind)||!v.starts_on||!v.ends_on||!Number(v.employee_id)||!['schedule','compensate'].includes(v.accounting_mode||'schedule')||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(Number(v.employee_id))) return json(res,422,{error:'Выберите действующего сотрудника из состава графика'});
     const accountingMode=v.kind==='office'?'schedule':(v.accounting_mode||'schedule');
-    const defaultHours=v.kind==='office'?0:(v.kind==='holiday'||v.starts_on===v.ends_on?2:4);
+    const limit=dutyHoursLimit(v),defaultHours=limit;
     const hours=v.kind==='office'?0:(v.hours===undefined||v.hours===''?defaultHours:Number(v.hours));
-    if(!Number.isFinite(hours)||hours<0||hours>24||(v.kind!=='office'&&hours<=0)) return json(res,422,{error:'Укажите корректное количество часов для дежурства'});
+    if(!Number.isFinite(hours)||hours<0||hours>limit||(v.kind!=='office'&&hours<=0)) return json(res,422,{error:`Один выходной компенсирует до 2 ч, оба выходных — до 4 ч`});
     const r=db.prepare('INSERT INTO duties (kind,starts_on,ends_on,employee_id,hours,accounting_mode) VALUES (?,?,?,?,?,?)').run(v.kind,v.starts_on,v.ends_on,Number(v.employee_id),hours,accountingMode);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Назначено дежурство', `${v.kind==='office'?'Офис':'Поддержка'} · ${employeeName(v.employee_id)} · ${v.starts_on}–${v.ends_on} · ${accountingMode==='compensate'?'компенсация':'по графику'}`); return json(res,201,snapshot(actor));
   }
@@ -236,7 +244,7 @@ async function api(req,res,url) {
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(updateMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     if(!['scheduled','confirmed'].includes(duty.status)) return json(res,409,{error:'Это дежурство нельзя редактировать'});
     const v=await body(req); const hours=duty.kind==='office'?0:Number(v.hours), accountingMode=v.accounting_mode||duty.accounting_mode;
-    if(!Number.isFinite(hours)||hours<0||hours>24||(duty.kind!=='office'&&hours<=0)) return json(res,422,{error:'Укажите корректное количество часов'});
+    if(!Number.isFinite(hours)||hours<0||hours>dutyHoursLimit(duty)||(duty.kind!=='office'&&hours<=0)) return json(res,422,{error:'Один выходной компенсирует до 2 ч, оба выходных — до 4 ч'});
     if(!['schedule','compensate'].includes(accountingMode)) return json(res,422,{error:'Выберите корректный режим дежурства'});
     db.prepare('UPDATE duties SET hours=?, accounting_mode=? WHERE id=?').run(hours,accountingMode,duty.id);
     const updated=db.prepare('SELECT * FROM duties WHERE id=?').get(duty.id),credited=reconcileDutyCredit(updated);
