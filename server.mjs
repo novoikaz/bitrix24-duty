@@ -54,6 +54,28 @@ if (!db.prepare("SELECT 1 FROM meta WHERE key='single_support_day_two_hours_v1'"
   db.exec("UPDATE ledger SET hours=2 WHERE kind='support' AND hours>2 AND reference_id IN (SELECT id FROM duties WHERE kind IN ('support','holiday') AND starts_on=ends_on)");
   db.prepare("INSERT INTO meta(key,value) VALUES ('single_support_day_two_hours_v1','1')").run();
 }
+// Компенсирующее дежурство учитывается полностью. Если часов больше долга,
+// остаток становится положительным и сохраняется в пользу сотрудника.
+if (!db.prepare("SELECT 1 FROM meta WHERE key='positive_compensation_balance_v1'").get()) {
+  db.exec('BEGIN');
+  try {
+    db.exec(`UPDATE ledger
+      SET hours=(SELECT d.hours FROM duties d WHERE d.id=ledger.reference_id)
+      WHERE kind='support' AND reference_id IN (
+        SELECT id FROM duties WHERE status='confirmed' AND accounting_mode='compensate' AND kind!='office'
+      )`);
+    db.exec(`INSERT INTO ledger(employee_id,occurred_on,hours,kind,reference_id,note)
+      SELECT d.employee_id,d.ends_on,d.hours,'support',d.id,'Подтверждённое компенсирующее дежурство'
+      FROM duties d
+      WHERE d.status='confirmed' AND d.accounting_mode='compensate' AND d.kind!='office'
+        AND NOT EXISTS (SELECT 1 FROM ledger l WHERE l.kind='support' AND l.reference_id=d.id)`);
+    db.prepare("INSERT INTO meta(key,value) VALUES ('positive_compensation_balance_v1','1')").run();
+    db.exec('COMMIT');
+  } catch(error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
 
 const json = (res, status, value) => { res.writeHead(status, {'content-type':'application/json; charset=utf-8'}); res.end(JSON.stringify(value)); };
 const body = req => new Promise((resolve,reject) => { let s=''; req.on('data', x=>s+=x); req.on('end',()=>{try{resolve(s?JSON.parse(s):{})}catch{reject(new Error('Некорректный JSON'))}}); });
@@ -88,7 +110,7 @@ const dutyHoursLimit = duty => duty.kind==='office'?0:(duty.starts_on===duty.end
 function reconcileDutyCredit(duty){
   db.prepare("DELETE FROM ledger WHERE reference_id=? AND kind='support'").run(duty.id);
   if(duty.status!=='confirmed'||duty.kind==='office'||duty.accounting_mode!=='compensate')return 0;
-  const credited=Math.min(Number(duty.hours),Math.max(0,-Number(balance(duty.employee_id))));
+  const credited=Number(duty.hours);
   if(credited>0)db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(duty.employee_id,duty.ends_on,credited,'support',duty.id,'Подтверждённое компенсирующее дежурство');
   return credited;
 }
@@ -188,6 +210,9 @@ function snapshot(user=null) {
     duties: db.prepare(`SELECT d.*, e.name, e.avatar FROM duties d JOIN employees e ON e.id=d.employee_id WHERE d.status NOT IN ('cancelled','rejected') ORDER BY d.starts_on`).all(),
     absences: db.prepare(`SELECT a.*, e.name, e.avatar FROM absences a JOIN employees e ON e.id=a.employee_id ORDER BY occurred_on DESC`).all(),
     balances: db.prepare('SELECT id,name,avatar FROM employees WHERE is_active=1 AND is_eligible=1').all().map(e=>({...e, hours:balance(e.id)})),
+    ledger: user ? (canEdit(user)
+      ? db.prepare('SELECT l.*,e.name,e.avatar FROM ledger l JOIN employees e ON e.id=l.employee_id ORDER BY l.occurred_on,l.id').all()
+      : db.prepare('SELECT l.*,e.name,e.avatar FROM ledger l JOIN employees e ON e.id=l.employee_id WHERE l.employee_id=? ORDER BY l.occurred_on,l.id').all(Number(user.ID))) : [],
     audit: db.prepare('SELECT a.*, e.id AS actor_id, e.name AS actor_name, e.avatar AS actor_avatar FROM audit_log a LEFT JOIN employees e ON e.name=a.actor ORDER BY a.id DESC LIMIT 15').all(),
     officeChecklist: db.prepare('SELECT duty_id,item_key,done,updated_at FROM duty_checklist').all(),
     swapRequests: db.prepare(`SELECT s.*, d.kind, d.starts_on, d.ends_on, d.hours, f.name AS from_name, t.name AS to_name FROM swap_requests s JOIN duties d ON d.id=s.duty_id JOIN employees f ON f.id=s.from_employee_id JOIN employees t ON t.id=s.to_employee_id WHERE s.status NOT IN ('rejected','cancelled') ORDER BY s.id DESC`).all(),
@@ -386,12 +411,8 @@ async function api(req,res,url) {
     if(!canEdit(actor)||request.status!=='pending_admin') return json(res,403,{error:'Подтверждать обмен может только редактор после согласия сотрудника'});
     // Если смена уже подтверждена как компенсирующая, переносим её учёт с прежнего сотрудника на нового.
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(request.duty_id);
-    db.prepare('DELETE FROM ledger WHERE reference_id=? AND kind=?').run(duty.id,'support');
     db.prepare('UPDATE duties SET employee_id=? WHERE id=?').run(request.to_employee_id,request.duty_id);
-    if(duty.status==='confirmed'&&duty.accounting_mode==='compensate'){
-      const credited=Math.min(duty.hours,Math.max(0,-balance(request.to_employee_id)));
-      if(credited) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(request.to_employee_id,duty.ends_on,credited,'support',duty.id,'Компенсирующее дежурство после обмена');
-    }
+    reconcileDutyCredit({...duty,employee_id:request.to_employee_id});
     db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('approved',request.id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor));
   }
@@ -417,6 +438,6 @@ const server=http.createServer(async(req,res)=>{ try {
   const url=new URL(req.url,`http://${req.headers.host}`); if(url.pathname.startsWith('/api/') || (url.pathname==='/install' && req.method!=='GET')) return api(req,res,url);
   const file=url.pathname==='/'?'index.html':url.pathname==='/install'?'install.html':url.pathname.replace(/^\//,''); const path=join(process.cwd(),'public',file);
   if(!path.startsWith(join(process.cwd(),'public')) || !existsSync(path)) return json(res,404,{error:'Страница не найдена'});
-  res.writeHead(200,{'content-type':mime[extname(path)]||'application/octet-stream'}); const content=await readFile(path); res.end(file==='index.html'?String(content).replace('</body>','<script src="/features.js"></script></body>'):content);
+  res.writeHead(200,{'content-type':mime[extname(path)]||'application/octet-stream'}); const content=await readFile(path); res.end(content);
 } catch(e) { console.error(e); json(res,500,{error:e.message||'Внутренняя ошибка'}); }});
 server.listen(port, process.env.HOST || '0.0.0.0', ()=>{console.log(`Дежурства: http://localhost:${port}`); reminderTick(); setInterval(reminderTick,60_000);});
