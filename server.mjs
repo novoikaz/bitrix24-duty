@@ -413,8 +413,9 @@ async function api(req,res,url) {
     db.prepare('INSERT INTO swap_requests(duty_id,from_employee_id,to_employee_id,note) VALUES (?,?,?,?)').run(dutyId,currentId,targetId,String(v.note||''));
     const actorName=`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim()||'Сотрудник';
     const dutyKind=duty.kind==='office'?'офисное дежурство':'дежурство поддержки';
-    await notifyByWebhook(targetId,`${actorName} предлагает вам заменить его на ${dutyKind}: ${friendlyPeriodRu(duty.starts_on,duty.ends_on)}.${v.note?` Комментарий: ${String(v.note)}`:''} Откройте «Дежурства», чтобы согласиться или отклонить предложение.`);
-    audit(actorName,'Предложен обмен дежурством', `${duty.starts_on}–${duty.ends_on}`); return json(res,201,snapshot(actor));
+    let notificationWarning='';
+    try{await notifyByWebhook(targetId,`${actorName} предлагает вам заменить его на ${dutyKind}: ${friendlyPeriodRu(duty.starts_on,duty.ends_on)}.${v.note?` Комментарий: ${String(v.note)}`:''} [URL=${dutyAppUrl()}]Открыть «Дежурства» и ответить[/URL]`)}catch(error){notificationWarning=`Предложение создано, но уведомление не отправлено: ${error.message}`}
+    audit(actorName,'Предложен обмен дежурством', `${duty.starts_on}–${duty.ends_on}${notificationWarning?' · ошибка уведомления':''}`);const result=snapshot(actor);if(notificationWarning)result.notificationWarning=notificationWarning;return json(res,201,result);
   }
   const swapAction=url.pathname.match(/^\/api\/swaps\/(\d+)\/(accept|reject|approve)$/);
   if (req.method==='POST' && swapAction) {
@@ -425,18 +426,19 @@ async function api(req,res,url) {
       if(actorId!==request.to_employee_id||request.status!=='pending_target') return json(res,403,{error:'Эта заявка недоступна для подтверждения'});
       db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('pending_admin',request.id);
       const actorName=`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim()||'Сотрудник';
-      await notifyByWebhook(request.from_employee_id,`${actorName} согласился заменить вас на дежурстве: ${friendlyPeriodRu(request.starts_on,request.ends_on)}. Заявка передана редактору на окончательное подтверждение.`);
+      const notificationErrors=[];
+      try{await notifyByWebhook(request.from_employee_id,`${actorName} согласился заменить вас на дежурстве: ${friendlyPeriodRu(request.starts_on,request.ends_on)}. Заявка передана редактору на окончательное подтверждение.`)}catch(error){notificationErrors.push(error.message)}
       const approver=swapApprover();
       if(approver) {
         const fromName=employeeName(request.from_employee_id), toName=employeeName(request.to_employee_id);
         const kind=request.kind==='office'?'офисного дежурства':'дежурства поддержки';
-        await notifyByWebhook(approver.id,`Требуется подтверждение обмена ${kind}: ${fromName} → ${toName}, ${friendlyPeriodRu(request.starts_on,request.ends_on)}. [URL=${dutyAppUrl()}]Открыть «Дежурства» и подтвердить[/URL]`);
+        try{await notifyByWebhook(approver.id,`Требуется подтверждение обмена ${kind}: ${fromName} → ${toName}, ${friendlyPeriodRu(request.starts_on,request.ends_on)}. [URL=${dutyAppUrl()}]Открыть «Дежурства» и подтвердить[/URL]`)}catch(error){notificationErrors.push(error.message)}
         audit(actorName,'Обмен передан руководителю на подтверждение', `${fromName} → ${toName} · ${request.starts_on}–${request.ends_on} · ${approver.name}`);
       } else audit(actorName,'Обмен ожидает подтверждения редактора', `${request.starts_on}–${request.ends_on} · руководитель Алдияр Байгабулов не найден`);
       audit(actorName,'Сотрудник согласился на обмен', `${request.starts_on}–${request.ends_on}`);
-      return json(res,200,snapshot(actor));
+      const result=snapshot(actor);if(notificationErrors.length)result.notificationWarning=`Решение сохранено, но часть уведомлений не отправлена: ${notificationErrors[0]}`;return json(res,200,result);
     }
-    if(action==='reject') { if(actorId!==request.to_employee_id&&!actor.app_admin) return json(res,403,{error:'Отклонить заявку может получатель или администратор'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('rejected',request.id); audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Отклонён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor)); }
+    if(action==='reject') { if(actorId!==request.to_employee_id&&!canEdit(actor)) return json(res,403,{error:'Отклонить заявку может получатель или редактор'}); db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('rejected',request.id);const actorName=`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim()||'Сотрудник';let notificationWarning='';try{await notifyByWebhook(request.from_employee_id,`${actorName} отклонил обмен дежурством: ${friendlyPeriodRu(request.starts_on,request.ends_on)}.`)}catch(error){notificationWarning=`Отказ сохранён, но уведомление не отправлено: ${error.message}`}audit(actorName,'Отклонён обмен дежурством', `${request.starts_on}–${request.ends_on}`);const result=snapshot(actor);if(notificationWarning)result.notificationWarning=notificationWarning;return json(res,200,result); }
     if(!canEdit(actor)||request.status!=='pending_admin') return json(res,403,{error:'Подтверждать обмен может только редактор после согласия сотрудника'});
     // Если смена уже подтверждена как компенсирующая, переносим её учёт с прежнего сотрудника на нового.
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(request.duty_id);
@@ -444,7 +446,9 @@ async function api(req,res,url) {
     reconcileEmployeeDutyCredits(duty.employee_id);
     reconcileDutyCredit({...duty,employee_id:request.to_employee_id});
     db.prepare('UPDATE swap_requests SET status=? WHERE id=?').run('approved',request.id);
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждён обмен дежурством', `${request.starts_on}–${request.ends_on}`); return json(res,200,snapshot(actor));
+    const actorName=`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim()||'Редактор',notificationErrors=[],message=`${actorName} подтвердил обмен дежурством ${friendlyPeriodRu(request.starts_on,request.ends_on)}. В графике назначен ${employeeName(request.to_employee_id)}. [URL=${dutyAppUrl()}]Открыть график[/URL]`;
+    for(const employeeId of new Set([request.from_employee_id,request.to_employee_id]))try{await notifyByWebhook(employeeId,message)}catch(error){notificationErrors.push(error.message)}
+    audit(actorName,'Подтверждён обмен дежурством', `${request.starts_on}–${request.ends_on}`);const result=snapshot(actor);if(notificationErrors.length)result.notificationWarning=`Обмен подтверждён, но часть уведомлений не отправлена: ${notificationErrors[0]}`;return json(res,200,result);
   }
   const remindMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/remind$/);
   if(req.method==='POST' && remindMatch) {
