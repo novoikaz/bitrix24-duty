@@ -57,8 +57,9 @@ function weeklyDutyCard(label,duty,empty,isNearest=false){
   return `<article class="summary-card weekly-card${isNearest?' nearest':''}"><span class="weekly-label">${label}${isNearest?' · ближайшее':''}</span><div class="weekly-person">${avatar(duty)}<div><div class="name-line"><strong>${esc(duty.name)}</strong>${isMe?'<em class="self-badge">Это вы</em>':''}</div><span><b class="relative-date">${relative}</b> · ${friendlyPeriod(duty.starts_on,duty.ends_on)} · ${detail}</span></div><span class="balance-pill ${status.cls}"><i class="balance-dot ${status.cls}"></i>${status.text}</span></div></article>`;
 }
 function weekDuties(){
-  const now=new Date();now.setHours(0,0,0,0);const start=new Date(now);start.setDate(now.getDate()-((now.getDay()+6)%7));const end=new Date(start);end.setDate(start.getDate()+6);const from=dateKey(start),to=dateKey(end),items=state.duties.filter(item=>item.starts_on<=to&&item.ends_on>=from);
-  return {office:items.find(item=>item.kind==='office'),support:items.find(item=>item.kind!=='office')};
+  const now=new Date();now.setHours(0,0,0,0);const today=dateKey(now),start=new Date(now);start.setDate(now.getDate()-((now.getDay()+6)%7));const end=new Date(start);end.setDate(start.getDate()+6);const from=dateKey(start),to=dateKey(end),items=state.duties.filter(item=>item.starts_on<=to&&item.ends_on>=from);
+  const choose=list=>list.filter(item=>item.ends_on>=today).sort((a,b)=>a.starts_on.localeCompare(b.starts_on)||a.ends_on.localeCompare(b.ends_on))[0]||list.sort((a,b)=>b.ends_on.localeCompare(a.ends_on))[0];
+  return {office:choose(items.filter(item=>item.kind==='office')),support:choose(items.filter(item=>item.kind!=='office'))};
 }
 
 function renderSchedule(){
