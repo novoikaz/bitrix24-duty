@@ -52,7 +52,7 @@ function balanceStatus(hours){return Number(hours)<0?{cls:'debt',text:`Есть 
 function relativeDutyDate(duty){const today=new Date();today.setHours(0,0,0,0);const start=new Date(`${duty.starts_on}T00:00:00`),end=new Date(`${duty.ends_on}T00:00:00`);if(today>=start&&today<=end)return 'Сегодня';const days=Math.round((start-today)/86400000);if(days===1)return 'Завтра';if(days>1)return `Через ${days} дн.`;if(days===-1)return 'Вчера';return `${Math.abs(days)} дн. назад`}
 function weeklyDutyCard(label,duty,empty,isNearest=false){
   if(!duty)return `<article class="summary-card weekly-card"><span class="weekly-label">${label}</span><div class="zero-note">${empty}</div></article>`;
-  const status=balanceStatus(balanceFor(duty.employee_id)),detail=duty.kind==='office'?'Офисное дежурство':'Дежурство поддержки',isMe=Number(duty.employee_id)===Number(state.currentEmployeeId),relative=relativeDutyDate(duty);
+  const status=balanceStatus(balanceFor(duty.employee_id)),detail=duty.kind==='office'?'Офисное дежурство':'Дежурство поддержки',isMe=Number(duty.employee_id)===Number(currentEmployee()?.id),relative=relativeDutyDate(duty);
   return `<article class="summary-card weekly-card${isNearest?' nearest':''}"><span class="weekly-label">${label}${isNearest?' · ближайшее':''}</span><div class="weekly-person">${avatar(duty)}<div><div class="name-line"><strong>${esc(duty.name)}</strong>${isMe?'<em class="self-badge">Это вы</em>':''}</div><span><b class="relative-date">${relative}</b> · ${friendlyPeriod(duty.starts_on,duty.ends_on)} · ${detail}</span></div><span class="balance-pill ${status.cls}"><i class="balance-dot ${status.cls}"></i>${status.text}</span></div></article>`;
 }
 function weekDuties(){
