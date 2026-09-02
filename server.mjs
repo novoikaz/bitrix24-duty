@@ -77,6 +77,13 @@ const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || 
 const canEdit = user => Boolean(user?.app_admin || db.prepare('SELECT is_editor FROM employees WHERE id=?').get(Number(user?.ID||0))?.is_editor);
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
 const balance = id => db.prepare('SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=?').get(id).hours;
+function reconcileDutyCredit(duty){
+  db.prepare("DELETE FROM ledger WHERE reference_id=? AND kind='support'").run(duty.id);
+  if(duty.status!=='confirmed'||duty.kind==='office'||duty.accounting_mode!=='compensate')return 0;
+  const credited=Math.min(Number(duty.hours),Math.max(0,-Number(balance(duty.employee_id))));
+  if(credited>0)db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(duty.employee_id,duty.ends_on,credited,'support',duty.id,'Подтверждённое компенсирующее дежурство');
+  return credited;
+}
 const employeeName = id => db.prepare('SELECT name FROM employees WHERE id=?').get(Number(id))?.name || 'Сотрудник';
 const absenceName = type => ({vacation:'Отпуск',sick_leave:'Больничный',time_off:'Отгул',business_trip:'Командировка',personal:'Личное отсутствие',unpaid_leave:'Без содержания',other:'Отсутствие'}[type]||'Отсутствие');
 const absenceCalendarParams = (absence,autoDetect=false) => ({type:'user',ownerId:Number(absence.employee_id),name:absenceName(absence.absence_type),description:[absence.note,'Добавлено из приложения «Дежурства»'].filter(Boolean).join('\n'),from:absence.occurred_on,to:absence.occurred_on,skip_time:'Y',...(autoDetect?{auto_detect_section:'Y'}:{}),accessibility:'absent',importance:'normal',is_meeting:'N',private_event:'N'});
@@ -227,12 +234,13 @@ async function api(req,res,url) {
   if (req.method==='PATCH' && updateMatch) {
     const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для редактирования'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(updateMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
-    if(duty.status!=='scheduled') return json(res,409,{error:'Можно редактировать только неподтверждённое дежурство'});
+    if(!['scheduled','confirmed'].includes(duty.status)) return json(res,409,{error:'Это дежурство нельзя редактировать'});
     const v=await body(req); const hours=duty.kind==='office'?0:Number(v.hours), accountingMode=v.accounting_mode||duty.accounting_mode;
     if(!Number.isFinite(hours)||hours<0||hours>24||(duty.kind!=='office'&&hours<=0)) return json(res,422,{error:'Укажите корректное количество часов'});
     if(!['schedule','compensate'].includes(accountingMode)) return json(res,422,{error:'Выберите корректный режим дежурства'});
     db.prepare('UPDATE duties SET hours=?, accounting_mode=? WHERE id=?').run(hours,accountingMode,duty.id);
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Изменено дежурство', `${duty.starts_on}–${duty.ends_on}: ${hours} ч`); return json(res,200,snapshot(actor));
+    const updated=db.prepare('SELECT * FROM duties WHERE id=?').get(duty.id),credited=reconcileDutyCredit(updated);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Изменено дежурство', `${duty.starts_on}–${duty.ends_on}: ${hours} ч · ${accountingMode==='compensate'?`компенсация ${credited} ч`:'по графику'}`); return json(res,200,{...snapshot(actor),creditApplied:credited});
   }
   const rejectMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/reject$/);
   if (req.method==='POST' && rejectMatch) {
@@ -248,9 +256,8 @@ async function api(req,res,url) {
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(confirmMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     if(duty.status==='confirmed') return json(res,409,{error:'Дежурство уже подтверждено'});
     db.prepare('UPDATE duties SET status=? WHERE id=?').run('confirmed',duty.id);
-    const currentBalance=balance(duty.employee_id), credited=duty.accounting_mode==='compensate'?Math.min(duty.hours,Math.max(0,-currentBalance)):0;
-    if(credited) db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)').run(duty.employee_id,duty.ends_on,credited,'support',duty.id,'Подтверждённое компенсирующее дежурство');
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждено дежурство', `${duty.kind==='office'?'Офис':'Поддержка'} · ${employeeName(duty.employee_id)} · ${duty.starts_on}–${duty.ends_on} · возвращено ${credited} ч`); return json(res,200,snapshot(actor));
+    const confirmed={...duty,status:'confirmed'},credited=reconcileDutyCredit(confirmed);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Подтверждено дежурство', `${duty.kind==='office'?'Офис':'Поддержка'} · ${employeeName(duty.employee_id)} · ${duty.starts_on}–${duty.ends_on} · возвращено ${credited} ч`); return json(res,200,{...snapshot(actor),creditApplied:credited});
   }
   const deleteMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/delete$/);
   if (req.method==='POST' && deleteMatch) {
