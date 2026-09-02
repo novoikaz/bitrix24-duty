@@ -109,10 +109,22 @@ const balance = id => Math.min(0,Number(db.prepare('SELECT COALESCE(SUM(hours),0
 const dutyHoursLimit = duty => duty.kind==='office'?0:(duty.starts_on===duty.ends_on?2:4);
 function reconcileEmployeeDutyCredits(employeeId){
   db.prepare("DELETE FROM ledger WHERE employee_id=? AND kind='support'").run(employeeId);
-  let debt=Math.max(0,-Number(balance(employeeId)));
-  const duties=db.prepare("SELECT * FROM duties WHERE employee_id=? AND status='confirmed' AND kind!='office' AND accounting_mode='compensate' ORDER BY ends_on,id").all(employeeId);
+  const ledgerEvents=db.prepare("SELECT id,occurred_on,hours FROM ledger WHERE employee_id=? AND kind!='support' ORDER BY occurred_on,id").all(employeeId).map(item=>({...item,eventType:'ledger'}));
+  const dutyEvents=db.prepare("SELECT * FROM duties WHERE employee_id=? AND status='confirmed' AND kind!='office' AND accounting_mode='compensate' ORDER BY ends_on,id").all(employeeId).map(item=>({...item,occurred_on:item.ends_on,eventType:'duty'}));
+  // Старая смена не должна закрывать отсутствие, которое появилось позднее.
+  // На одной дате сначала учитываем отсутствие, затем компенсирующее дежурство.
+  const events=[...ledgerEvents,...dutyEvents].sort((a,b)=>{
+    const byDate=a.occurred_on.localeCompare(b.occurred_on);if(byDate)return byDate;
+    if(a.eventType!==b.eventType)return a.eventType==='ledger'?-1:1;
+    return a.id-b.id;
+  });
+  let runningBalance=0;
   const add=db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)');
-  for(const duty of duties){const credited=Math.min(Number(duty.hours),debt);if(credited>0)add.run(employeeId,duty.ends_on,credited,'support',duty.id,'Компенсация долга подтверждённым дежурством');debt-=credited;if(debt<=0)break;}
+  for(const event of events){
+    if(event.eventType==='ledger'){runningBalance+=Number(event.hours);continue;}
+    const credited=Math.min(Number(event.hours),Math.max(0,-runningBalance));
+    if(credited>0){add.run(employeeId,event.ends_on,credited,'support',event.id,'Компенсация существующего долга подтверждённым дежурством');runningBalance+=credited;}
+  }
 }
 function reconcileDutyCredit(duty){
   reconcileEmployeeDutyCredits(duty.employee_id);
@@ -121,6 +133,10 @@ function reconcileDutyCredit(duty){
 if (!db.prepare("SELECT 1 FROM meta WHERE key='no_positive_duty_balance_v1'").get()) {
   for(const employee of db.prepare('SELECT id FROM employees').all())reconcileEmployeeDutyCredits(employee.id);
   db.prepare("INSERT INTO meta(key,value) VALUES ('no_positive_duty_balance_v1','1')").run();
+}
+if (!db.prepare("SELECT 1 FROM meta WHERE key='chronological_duty_compensation_v1'").get()) {
+  for(const employee of db.prepare('SELECT id FROM employees').all())reconcileEmployeeDutyCredits(employee.id);
+  db.prepare("INSERT INTO meta(key,value) VALUES ('chronological_duty_compensation_v1','1')").run();
 }
 const employeeName = id => db.prepare('SELECT name FROM employees WHERE id=?').get(Number(id))?.name || 'Сотрудник';
 const absenceName = type => ({vacation:'Отпуск',sick_leave:'Больничный',time_off:'Отгул',business_trip:'Командировка',personal:'Личное отсутствие',unpaid_leave:'Без содержания',other:'Отсутствие'}[type]||'Отсутствие');
@@ -276,12 +292,15 @@ async function api(req,res,url) {
     const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для редактирования'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(updateMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
     if(!['scheduled','confirmed'].includes(duty.status)) return json(res,409,{error:'Это дежурство нельзя редактировать'});
-    const v=await body(req); const hours=duty.kind==='office'?0:Number(v.hours), accountingMode=v.accounting_mode||duty.accounting_mode;
-    if(!Number.isFinite(hours)||hours<0||hours>dutyHoursLimit(duty)||(duty.kind!=='office'&&hours<=0)) return json(res,422,{error:'Один выходной компенсирует до 2 ч, оба выходных — до 4 ч'});
+    const v=await body(req),kind=String(v.kind||duty.kind),employeeId=Number(v.employee_id||duty.employee_id),startsOn=String(v.starts_on||duty.starts_on),endsOn=String(v.ends_on||duty.ends_on);
+    if(!['office','support','holiday'].includes(kind)||!/^\d{4}-\d{2}-\d{2}$/.test(startsOn)||!/^\d{4}-\d{2}-\d{2}$/.test(endsOn)||endsOn<startsOn||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(employeeId)) return json(res,422,{error:'Проверьте тип, сотрудника и период дежурства'});
+    const edited={...duty,kind,starts_on:startsOn,ends_on:endsOn,employee_id:employeeId},hours=kind==='office'?0:Number(v.hours??duty.hours),accountingMode=kind==='office'?'schedule':(v.accounting_mode||duty.accounting_mode);
+    if(!Number.isFinite(hours)||hours<0||hours>dutyHoursLimit(edited)||(kind!=='office'&&hours<=0)) return json(res,422,{error:'Один выходной компенсирует до 2 ч, оба выходных — до 4 ч'});
     if(!['schedule','compensate'].includes(accountingMode)) return json(res,422,{error:'Выберите корректный режим дежурства'});
-    db.prepare('UPDATE duties SET hours=?, accounting_mode=? WHERE id=?').run(hours,accountingMode,duty.id);
-    const updated=db.prepare('SELECT * FROM duties WHERE id=?').get(duty.id),credited=reconcileDutyCredit(updated);
-    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Изменено дежурство', `${duty.starts_on}–${duty.ends_on}: ${hours} ч · ${accountingMode==='compensate'?`компенсация ${credited} ч`:'по графику'}`); return json(res,200,{...snapshot(actor),creditApplied:credited});
+    db.prepare('UPDATE duties SET kind=?,starts_on=?,ends_on=?,employee_id=?,hours=?,accounting_mode=? WHERE id=?').run(kind,startsOn,endsOn,employeeId,hours,accountingMode,duty.id);
+    reconcileEmployeeDutyCredits(duty.employee_id);if(employeeId!==duty.employee_id)reconcileEmployeeDutyCredits(employeeId);
+    const credited=Number(db.prepare("SELECT COALESCE(SUM(hours),0) AS hours FROM ledger WHERE employee_id=? AND reference_id=? AND kind='support'").get(employeeId,duty.id).hours);
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Изменено дежурство', `${employeeName(employeeId)} · ${startsOn}–${endsOn} · ${kind==='office'?'офис':`${hours} ч`} · ${accountingMode==='compensate'?`компенсация ${credited} ч`:'по графику'}`); return json(res,200,{...snapshot(actor),creditApplied:credited});
   }
   const rejectMatch=url.pathname.match(/^\/api\/duties\/(\d+)\/reject$/);
   if (req.method==='POST' && rejectMatch) {
