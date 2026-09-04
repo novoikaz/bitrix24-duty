@@ -339,7 +339,15 @@ async function api(req,res,url) {
   if (req.method==='POST' && deleteMatch) {
     const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для редактирования'});
     const duty=db.prepare('SELECT * FROM duties WHERE id=?').get(Number(deleteMatch[1])); if(!duty) return json(res,404,{error:'Дежурство не найдено'});
-    db.prepare('DELETE FROM duties WHERE id=?').run(duty.id); reconcileEmployeeDutyCredits(duty.employee_id);
+    try{
+      db.exec('BEGIN');
+      db.prepare('DELETE FROM duty_checklist WHERE duty_id=?').run(duty.id);
+      db.prepare('DELETE FROM swap_requests WHERE duty_id=?').run(duty.id);
+      db.prepare('DELETE FROM notifications WHERE duty_id=?').run(duty.id);
+      db.prepare('DELETE FROM duties WHERE id=?').run(duty.id);
+      db.exec('COMMIT');
+    }catch(error){try{db.exec('ROLLBACK')}catch{};return json(res,500,{error:`Не удалось удалить дежурство: ${error.message||'ошибка базы данных'}`})}
+    reconcileEmployeeDutyCredits(duty.employee_id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Удалено дежурство', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,snapshot(actor));
   }
   if (req.method==='POST' && url.pathname==='/api/absences') {
