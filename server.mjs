@@ -106,6 +106,16 @@ const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || 
 const canEdit = user => Boolean(user?.app_admin || db.prepare('SELECT is_editor FROM employees WHERE id=?').get(Number(user?.ID||0))?.is_editor);
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
 const balance = id => db.prepare('SELECT hours FROM ledger WHERE employee_id=? ORDER BY occurred_on,id').all(id).reduce((current,item)=>Math.min(0,current+Number(item.hours)),0);
+const isWeekendDate = value => {
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(String(value||''))) return false;
+  const date=new Date(`${value}T00:00:00Z`),day=date.getUTCDay();
+  return Number.isFinite(date.getTime()) && (day===0 || day===6);
+};
+const validSupportPeriod = (startsOn,endsOn) => {
+  if(!isWeekendDate(startsOn)||!isWeekendDate(endsOn)) return false;
+  const from=new Date(`${startsOn}T00:00:00Z`),to=new Date(`${endsOn}T00:00:00Z`);
+  return to>=from && to-from<=86_400_000;
+};
 const dutyHoursLimit = duty => duty.kind==='office'?0:(duty.starts_on===duty.ends_on?2:4);
 function reconcileEmployeeDutyCredits(employeeId){
   db.prepare("DELETE FROM ledger WHERE employee_id=? AND kind='support'").run(employeeId);
@@ -284,6 +294,7 @@ async function api(req,res,url) {
   if (req.method==='POST' && url.pathname==='/api/duties') {
     const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для изменения графика'});
     const v=await body(req); if(!['office','support','holiday'].includes(v.kind)||!v.starts_on||!v.ends_on||!Number(v.employee_id)||!['schedule','compensate'].includes(v.accounting_mode||'schedule')||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(Number(v.employee_id))) return json(res,422,{error:'Выберите действующего сотрудника из состава графика'});
+    if(v.kind==='support'&&!validSupportPeriod(v.starts_on,v.ends_on)) return json(res,422,{error:'Дежурство поддержки можно назначить только на субботу, воскресенье или оба выходных дня'});
     const accountingMode=v.kind==='office'?'schedule':(v.accounting_mode||'schedule');
     const limit=dutyHoursLimit(v),defaultHours=limit;
     const hours=v.kind==='office'?0:(v.hours===undefined||v.hours===''?defaultHours:Number(v.hours));
@@ -298,6 +309,7 @@ async function api(req,res,url) {
     if(!['scheduled','confirmed'].includes(duty.status)) return json(res,409,{error:'Это дежурство нельзя редактировать'});
     const v=await body(req),kind=String(v.kind||duty.kind),employeeId=Number(v.employee_id||duty.employee_id),startsOn=String(v.starts_on||duty.starts_on),endsOn=String(v.ends_on||duty.ends_on);
     if(!['office','support','holiday'].includes(kind)||!/^\d{4}-\d{2}-\d{2}$/.test(startsOn)||!/^\d{4}-\d{2}-\d{2}$/.test(endsOn)||endsOn<startsOn||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(employeeId)) return json(res,422,{error:'Проверьте тип, сотрудника и период дежурства'});
+    if(kind==='support'&&!validSupportPeriod(startsOn,endsOn)) return json(res,422,{error:'Дежурство поддержки можно назначить только на субботу, воскресенье или оба выходных дня'});
     const edited={...duty,kind,starts_on:startsOn,ends_on:endsOn,employee_id:employeeId},hours=kind==='office'?0:Number(v.hours??duty.hours),accountingMode=kind==='office'?'schedule':(v.accounting_mode||duty.accounting_mode);
     if(!Number.isFinite(hours)||hours<0||hours>dutyHoursLimit(edited)||(kind!=='office'&&hours<=0)) return json(res,422,{error:'Один выходной компенсирует до 2 ч, оба выходных — до 4 ч'});
     if(!['schedule','compensate'].includes(accountingMode)) return json(res,422,{error:'Выберите корректный режим дежурства'});
