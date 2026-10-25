@@ -105,7 +105,12 @@ async function bitrixCall(req,method,params={}){
 const isAdmin = async req => Boolean((await b24User(req))?.IS_ADMIN === true || (await b24User(req))?.IS_ADMIN === 'Y');
 const canEdit = user => Boolean(user?.app_admin || db.prepare('SELECT is_editor FROM employees WHERE id=?').get(Number(user?.ID||0))?.is_editor);
 const audit = (actor, action, detail) => db.prepare('INSERT INTO audit_log(actor,action,detail) VALUES (?,?,?)').run(actor||'Администратор', action, detail);
-const balance = id => db.prepare('SELECT hours FROM ledger WHERE employee_id=? ORDER BY occurred_on,id').all(id).reduce((current,item)=>Math.min(0,current+Number(item.hours)),0);
+function applyLedgerEntry(current,item){
+  const hours=Number(item.hours);
+  if(item.kind==='bonus'||hours<0)return current+hours;
+  return current<0?Math.min(0,current+hours):current;
+}
+const balance = id => db.prepare('SELECT hours,kind FROM ledger WHERE employee_id=? ORDER BY occurred_on,id').all(id).reduce(applyLedgerEntry,0);
 const isWeekendDate = value => {
   if(!/^\d{4}-\d{2}-\d{2}$/.test(String(value||''))) return false;
   const date=new Date(`${value}T00:00:00Z`),day=date.getUTCDay();
@@ -119,7 +124,7 @@ const validSupportPeriod = (startsOn,endsOn) => {
 const dutyHoursLimit = duty => duty.kind==='office'?0:(duty.starts_on===duty.ends_on?2:4);
 function reconcileEmployeeDutyCredits(employeeId){
   db.prepare("DELETE FROM ledger WHERE employee_id=? AND kind='support'").run(employeeId);
-  const ledgerEvents=db.prepare("SELECT id,occurred_on,hours FROM ledger WHERE employee_id=? AND kind!='support' ORDER BY occurred_on,id").all(employeeId).map(item=>({...item,eventType:'ledger'}));
+  const ledgerEvents=db.prepare("SELECT id,occurred_on,hours,kind FROM ledger WHERE employee_id=? AND kind!='support' ORDER BY occurred_on,id").all(employeeId).map(item=>({...item,eventType:'ledger'}));
   const dutyEvents=db.prepare("SELECT * FROM duties WHERE employee_id=? AND status='confirmed' AND kind!='office' AND accounting_mode='compensate' ORDER BY ends_on,id").all(employeeId).map(item=>({...item,occurred_on:item.ends_on,eventType:'duty'}));
   // Старая смена не должна закрывать отсутствие, которое появилось позднее.
   // На одной дате сначала учитываем отсутствие, затем компенсирующее дежурство.
@@ -131,7 +136,9 @@ function reconcileEmployeeDutyCredits(employeeId){
   let runningBalance=0;
   const add=db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,reference_id,note) VALUES (?,?,?,?,?,?)');
   for(const event of events){
-    if(event.eventType==='ledger'){runningBalance=Math.min(0,runningBalance+Number(event.hours));continue;}
+    // Только явный бонус может создать положительный остаток. Это также не
+    // превращает старые положительные служебные строки в новые бонусы.
+    if(event.eventType==='ledger'){runningBalance=applyLedgerEntry(runningBalance,event);continue;}
     const credited=Math.min(Number(event.hours),Math.max(0,-runningBalance));
     if(credited>0){add.run(employeeId,event.ends_on,credited,'support',event.id,'Компенсация существующего долга подтверждённым дежурством');runningBalance+=credited;}
   }
@@ -349,6 +356,32 @@ async function api(req,res,url) {
     }catch(error){try{db.exec('ROLLBACK')}catch{};return json(res,500,{error:`Не удалось удалить дежурство: ${error.message||'ошибка базы данных'}`})}
     reconcileEmployeeDutyCredits(duty.employee_id);
     audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Удалено дежурство', `${duty.starts_on}–${duty.ends_on}`); return json(res,200,snapshot(actor));
+  }
+  if (req.method==='POST' && url.pathname==='/api/bonuses') {
+    const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для начисления бонуса'});
+    const v=await body(req),employeeId=Number(v.employee_id),hours=Number(v.hours),occurredOn=String(v.occurred_on||''),note=String(v.note||'').trim();
+    const parsedDate=new Date(`${occurredOn}T00:00:00Z`),validDate=/^\d{4}-\d{2}-\d{2}$/.test(occurredOn)&&Number.isFinite(parsedDate.getTime())&&parsedDate.toISOString().slice(0,10)===occurredOn;
+    if(!employeeId||!db.prepare('SELECT 1 FROM employees WHERE id=? AND is_active=1 AND is_eligible=1').get(employeeId)||!validDate||!Number.isFinite(hours)||hours<0.5||hours>100||Math.abs(hours*2-Math.round(hours*2))>1e-9) return json(res,422,{error:'Выберите сотрудника, дату и укажите бонус от 0,5 до 100 часов с шагом 0,5'});
+    if(note.length>500) return json(res,422,{error:'Комментарий должен быть короче 500 символов'});
+    let bonusId;
+    db.exec('BEGIN');
+    try{
+      const result=db.prepare('INSERT INTO ledger (employee_id,occurred_on,hours,kind,note) VALUES (?,?,?,?,?)').run(employeeId,occurredOn,hours,'bonus',note||'Бонус за переработку');
+      bonusId=Number(result.lastInsertRowid);
+      reconcileEmployeeDutyCredits(employeeId);
+      db.exec('COMMIT');
+    }catch(error){db.exec('ROLLBACK');throw error}
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Начислен бонус',`${employeeName(employeeId)} · +${hours} ч · ${occurredOn}${note?` · ${note}`:''}`);
+    return json(res,201,{...snapshot(actor),bonusId});
+  }
+  const bonusDeleteMatch=url.pathname.match(/^\/api\/bonuses\/(\d+)\/delete$/);
+  if(req.method==='POST'&&bonusDeleteMatch){
+    const actor=await b24User(req);if(!canEdit(actor))return json(res,403,{error:'Недостаточно прав для удаления бонуса'});
+    const bonus=db.prepare("SELECT * FROM ledger WHERE id=? AND kind='bonus'").get(Number(bonusDeleteMatch[1]));if(!bonus)return json(res,404,{error:'Бонус не найден'});
+    db.exec('BEGIN');
+    try{db.prepare("DELETE FROM ledger WHERE id=? AND kind='bonus'").run(bonus.id);reconcileEmployeeDutyCredits(bonus.employee_id);db.exec('COMMIT')}catch(error){db.exec('ROLLBACK');throw error}
+    audit(`${actor.NAME||''} ${actor.LAST_NAME||''}`.trim(),'Удалён бонус',`${employeeName(bonus.employee_id)} · ${bonus.hours} ч · ${bonus.occurred_on}`);
+    return json(res,200,snapshot(actor));
   }
   if (req.method==='POST' && url.pathname==='/api/absences') {
     const actor=await b24User(req); if(!canEdit(actor)) return json(res,403,{error:'Недостаточно прав для редактирования'});
