@@ -47,6 +47,8 @@ globalThis.BX24 = {
 
 await import('../static-app-src/bitrix-static.js');
 await DutyStaticStore.install();
+assert.ok(listFields.every(field => /^DUTY_[A-Z_]+$/.test(field.CODE)), 'Every custom list field must have a Bitrix24 code');
+assert.equal(new Set(listFields.map(field => field.CODE)).size, listFields.length, 'Field codes must be unique');
 await DutyStaticStore.init();
 
 let state = await DutyStaticStore.api('/api/bootstrap');

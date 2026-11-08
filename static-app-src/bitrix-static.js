@@ -122,12 +122,19 @@
       }));
     }
     const existingFields = asArray(await call('lists.field.get', { IBLOCK_TYPE_ID: LIST_TYPE, IBLOCK_ID: listId }));
-    for (const [, name, type] of FIELD_DEFS) {
+    for (const [key, name, type] of FIELD_DEFS) {
       if (existingFields.some(item => item.NAME === name)) continue;
       await call('lists.field.add', {
         IBLOCK_TYPE_ID: LIST_TYPE,
         IBLOCK_ID: listId,
-        FIELDS: { NAME: name, TYPE: type, IS_REQUIRED: 'N', MULTIPLE: 'N', SORT: 500 }
+        FIELDS: {
+          NAME: name,
+          CODE: `DUTY_${key.toUpperCase()}`,
+          TYPE: type,
+          IS_REQUIRED: 'N',
+          MULTIPLE: 'N',
+          SORT: 500
+        }
       });
     }
     await discoverSchema();
