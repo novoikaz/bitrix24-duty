@@ -280,6 +280,20 @@ async function syncEmployees(req) {
   return user;
 }
 async function api(req,res,url) {
+  if (req.method==='GET' && url.pathname==='/api/export') {
+    const actor=await b24User(req); if(!actor?.app_admin) return json(res,403,{error:'Экспортировать данные может только администратор портала'});
+    return json(res,200,{
+      version:1,
+      exported_at:new Date().toISOString(),
+      source:'render-sqlite',
+      employees:db.prepare('SELECT * FROM employees WHERE is_active=1 ORDER BY id').all(),
+      duties:db.prepare('SELECT * FROM duties ORDER BY id').all(),
+      absences:db.prepare('SELECT * FROM absences ORDER BY id').all(),
+      ledger:db.prepare('SELECT * FROM ledger ORDER BY occurred_on,id').all(),
+      audit:db.prepare('SELECT a.*,e.id AS actor_id,e.name AS actor_name FROM audit_log a LEFT JOIN employees e ON e.name=a.actor ORDER BY a.id').all(),
+      swapRequests:db.prepare('SELECT s.*,d.kind,d.starts_on,d.ends_on,d.hours FROM swap_requests s JOIN duties d ON d.id=s.duty_id ORDER BY s.id').all()
+    });
+  }
   if (req.method==='POST' && url.pathname==='/api/bitrix/sync') { const user=await syncEmployees(req); return json(res,200,snapshot(user)); }
   if (req.method==='GET' && url.pathname==='/api/bootstrap') { const user=await b24User(req); return json(res,200,snapshot(user)); }
   const editorMatch=url.pathname.match(/^\/api\/employees\/(\d+)\/editor$/);

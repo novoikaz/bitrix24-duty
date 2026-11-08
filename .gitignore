@@ -4,3 +4,4 @@
 *.sqlite-wal
 .env
 node_modules/
+dist/bitrix24-duty-static/
