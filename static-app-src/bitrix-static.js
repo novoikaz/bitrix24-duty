@@ -319,7 +319,16 @@
       swapRequests,
       permissions: { canEdit: canEdit(), canManageEditors: currentIsAdmin },
       currentEmployeeId: Number(currentUser?.ID || 0),
-      storage: { type: 'bitrix_lists', listId }
+      storage: {
+        type: 'bitrix_lists',
+        listId,
+        recordCount: cachedRecords.length,
+        recordCounts: cachedRecords.reduce((counts, item) => {
+          const type = String(item.record_type || 'unknown');
+          counts[type] = (counts[type] || 0) + 1;
+          return counts;
+        }, {})
+      }
     };
   }
 
