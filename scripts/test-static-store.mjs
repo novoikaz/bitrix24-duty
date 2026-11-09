@@ -94,5 +94,9 @@ state = await DutyStaticStore.importData({
 assert.equal(state.balances.find(item => item.id === 2).hours, 1.5);
 assert.equal(state.absences.length, 1);
 assert.equal(state.duties.length, 1);
+await assert.rejects(
+  DutyStaticStore.importData({ version: 1, employees: [], duties: [], absences: [], ledger: [], audit: [], swapRequests: [] }),
+  /Хранилище уже содержит рабочие данные/
+);
 
 console.log('static store: ok');

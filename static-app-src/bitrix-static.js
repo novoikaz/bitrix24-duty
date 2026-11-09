@@ -555,42 +555,51 @@
     await discoverSchema();
   }
 
+  let importInProgress = false;
+
   async function importData(payload) {
     requireAdmin();
     if (!payload || Number(payload.version) !== 1) throw new Error('Выбран файл неподдерживаемого формата.');
-    const existingBusinessRows = cachedRecords.filter(item => !['employee', 'audit'].includes(item.record_type));
-    if (existingBusinessRows.length) throw new Error('Хранилище уже содержит рабочие данные. Импорт разрешён только в пустое приложение.');
-    const dutyIds = new Map(), absenceIds = new Map(), bonusIds = new Map();
-    for (const employee of payload.employees || []) {
-      if (!cachedUsers.some(item => Number(item.id) === Number(employee.id))) continue;
-      await saveEmployeeSetting(employee.id, { status: employee.is_eligible === 0 ? 'ineligible' : 'eligible', kind: employee.is_editor ? 'editor' : 'viewer' });
+    if (importInProgress) throw new Error('Перенос уже выполняется. Дождитесь его завершения.');
+    importInProgress = true;
+    try {
+      await loadRecords();
+      const existingBusinessRows = cachedRecords.filter(item => !['employee', 'audit'].includes(item.record_type));
+      if (existingBusinessRows.length) throw new Error('Хранилище уже содержит рабочие данные. Импорт разрешён только в пустое приложение.');
+      const dutyIds = new Map(), absenceIds = new Map(), bonusIds = new Map();
+      for (const employee of payload.employees || []) {
+        if (!cachedUsers.some(item => Number(item.id) === Number(employee.id))) continue;
+        await saveEmployeeSetting(employee.id, { status: employee.is_eligible === 0 ? 'ineligible' : 'eligible', kind: employee.is_editor ? 'editor' : 'viewer' });
+      }
+      for (const duty of payload.duties || []) {
+        const id = await addRecord({ record_type: 'duty', employee_id: Number(duty.employee_id), start_date: duty.starts_on, end_date: duty.ends_on, hours: Number(duty.hours || 0), status: duty.status || 'scheduled', kind: duty.kind || 'support', mode: duty.accounting_mode || 'schedule', office_status: duty.office_status || 'scheduled', extra: 'legacy', name: `${duty.kind === 'office' ? 'Офис' : 'Поддержка'} · ${employeeName(duty.employee_id)} · ${duty.starts_on}` });
+        dutyIds.set(Number(duty.id), id);
+      }
+      for (const absence of payload.absences || []) {
+        const id = await addRecord({ record_type: 'absence', employee_id: Number(absence.employee_id), start_date: absence.occurred_on, end_date: absence.occurred_on, hours: Number(absence.hours), kind: absence.absence_type || 'personal', compensable: Number(absence.compensable || 0), note: absence.note || '', extra: 'legacy', name: `${absence.absence_type || 'Отсутствие'} · ${employeeName(absence.employee_id)} · ${absence.occurred_on}` });
+        absenceIds.set(Number(absence.id), id);
+      }
+      for (const row of payload.ledger || []) {
+        let referenceId = Number(row.reference_id || 0);
+        if (row.kind === 'bonus') {
+          const bonusId = await addRecord({ record_type: 'bonus', employee_id: Number(row.employee_id), start_date: row.occurred_on, end_date: row.occurred_on, hours: Number(row.hours), note: row.note || 'Бонус за переработку', extra: 'legacy', name: `Бонус +${row.hours} ч · ${employeeName(row.employee_id)}` });
+          bonusIds.set(Number(row.id), bonusId);
+          referenceId = bonusId;
+        } else if (row.kind === 'absence') referenceId = absenceIds.get(referenceId) || 0;
+        else if (row.kind === 'support') referenceId = dutyIds.get(referenceId) || 0;
+        await addRecord({ record_type: 'ledger', employee_id: Number(row.employee_id), start_date: row.occurred_on, end_date: row.occurred_on, hours: Number(row.hours), kind: row.kind || 'adjustment', reference_id: referenceId, note: row.note || '', extra: 'legacy', name: `Баланс · ${employeeName(row.employee_id)} · ${row.occurred_on}` });
+      }
+      for (const swap of payload.swapRequests || []) {
+        const dutyId = dutyIds.get(Number(swap.duty_id));
+        if (!dutyId) continue;
+        await addRecord({ record_type: 'swap', employee_id: Number(swap.from_employee_id), target_employee_id: Number(swap.to_employee_id), reference_id: dutyId, status: swap.status || 'pending_target', note: swap.note || '', start_date: swap.starts_on || '', end_date: swap.ends_on || '', kind: swap.kind || '', extra: 'legacy', name: `Обмен · ${employeeName(swap.from_employee_id)} → ${employeeName(swap.to_employee_id)}` });
+      }
+      for (const row of (payload.audit || []).slice(-100)) await addRecord({ record_type: 'audit', employee_id: Number(row.actor_id || currentUser.ID), start_date: String(row.occurred_at || today()).slice(0, 10), kind: row.action || 'Импортированное действие', note: row.detail || '', extra: 'legacy', name: `${row.action || 'История'} · ${row.actor_name || row.actor || ''}` });
+      await audit('Перенос данных завершён', `Импортировано: ${payload.duties?.length || 0} дежурств, ${payload.absences?.length || 0} отсутствий, ${payload.ledger?.length || 0} операций баланса`);
+      return refresh();
+    } finally {
+      importInProgress = false;
     }
-    for (const duty of payload.duties || []) {
-      const id = await addRecord({ record_type: 'duty', employee_id: Number(duty.employee_id), start_date: duty.starts_on, end_date: duty.ends_on, hours: Number(duty.hours || 0), status: duty.status || 'scheduled', kind: duty.kind || 'support', mode: duty.accounting_mode || 'schedule', office_status: duty.office_status || 'scheduled', extra: 'legacy', name: `${duty.kind === 'office' ? 'Офис' : 'Поддержка'} · ${employeeName(duty.employee_id)} · ${duty.starts_on}` });
-      dutyIds.set(Number(duty.id), id);
-    }
-    for (const absence of payload.absences || []) {
-      const id = await addRecord({ record_type: 'absence', employee_id: Number(absence.employee_id), start_date: absence.occurred_on, end_date: absence.occurred_on, hours: Number(absence.hours), kind: absence.absence_type || 'personal', compensable: Number(absence.compensable || 0), note: absence.note || '', extra: 'legacy', name: `${absence.absence_type || 'Отсутствие'} · ${employeeName(absence.employee_id)} · ${absence.occurred_on}` });
-      absenceIds.set(Number(absence.id), id);
-    }
-    for (const row of payload.ledger || []) {
-      let referenceId = Number(row.reference_id || 0);
-      if (row.kind === 'bonus') {
-        const bonusId = await addRecord({ record_type: 'bonus', employee_id: Number(row.employee_id), start_date: row.occurred_on, end_date: row.occurred_on, hours: Number(row.hours), note: row.note || 'Бонус за переработку', extra: 'legacy', name: `Бонус +${row.hours} ч · ${employeeName(row.employee_id)}` });
-        bonusIds.set(Number(row.id), bonusId);
-        referenceId = bonusId;
-      } else if (row.kind === 'absence') referenceId = absenceIds.get(referenceId) || 0;
-      else if (row.kind === 'support') referenceId = dutyIds.get(referenceId) || 0;
-      await addRecord({ record_type: 'ledger', employee_id: Number(row.employee_id), start_date: row.occurred_on, end_date: row.occurred_on, hours: Number(row.hours), kind: row.kind || 'adjustment', reference_id: referenceId, note: row.note || '', extra: 'legacy', name: `Баланс · ${employeeName(row.employee_id)} · ${row.occurred_on}` });
-    }
-    for (const swap of payload.swapRequests || []) {
-      const dutyId = dutyIds.get(Number(swap.duty_id));
-      if (!dutyId) continue;
-      await addRecord({ record_type: 'swap', employee_id: Number(swap.from_employee_id), target_employee_id: Number(swap.to_employee_id), reference_id: dutyId, status: swap.status || 'pending_target', note: swap.note || '', start_date: swap.starts_on || '', end_date: swap.ends_on || '', kind: swap.kind || '', extra: 'legacy', name: `Обмен · ${employeeName(swap.from_employee_id)} → ${employeeName(swap.to_employee_id)}` });
-    }
-    for (const row of (payload.audit || []).slice(-100)) await addRecord({ record_type: 'audit', employee_id: Number(row.actor_id || currentUser.ID), start_date: String(row.occurred_at || today()).slice(0, 10), kind: row.action || 'Импортированное действие', note: row.detail || '', extra: 'legacy', name: `${row.action || 'История'} · ${row.actor_name || row.actor || ''}` });
-    await audit('Перенос данных завершён', `Импортировано: ${payload.duties?.length || 0} дежурств, ${payload.absences?.length || 0} отсутствий, ${payload.ledger?.length || 0} операций баланса`);
-    return refresh();
   }
 
   window.DutyStaticStore = { init, install, importData, api: route, refresh, call };
