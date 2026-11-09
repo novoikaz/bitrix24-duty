@@ -602,5 +602,55 @@
     }
   }
 
-  window.DutyStaticStore = { init, install, importData, api: route, refresh, call };
+  function repairSignature(record) {
+    const numeric = new Set(['employee_id', 'target_employee_id', 'hours', 'compensable']);
+    const value = { name: String(record.name || '') };
+    for (const [key] of FIELD_DEFS) {
+      if (key === 'reference_id') continue;
+      value[key] = numeric.has(key) ? Number(record[key] || 0) : String(record[key] || '');
+    }
+    return JSON.stringify(value);
+  }
+
+  async function repairImport(payload) {
+    requireAdmin();
+    if (!payload || Number(payload.version) !== 1 || payload.kind !== 'duty-static-repair') {
+      throw new Error('Выбран файл неподдерживаемого формата восстановления.');
+    }
+    const deleteIds = [...new Set((payload.duplicateIds || []).map(Number).filter(Number.isInteger))];
+    const missing = Array.isArray(payload.missing) ? payload.missing : [];
+    if (!deleteIds.length && !missing.length) throw new Error('В файле нет операций восстановления.');
+    if (deleteIds.length > 500 || missing.length > 200) throw new Error('Файл восстановления превышает безопасный лимит.');
+    if (missing.some(item => item?.record?.record_type !== 'audit' || !Number.isInteger(Number(item.expectedCount)))) {
+      throw new Error('Файл восстановления содержит недопустимые записи.');
+    }
+
+    await loadRecords();
+    const existingIds = new Set(cachedRecords.map(item => item.id));
+    let deleted = 0;
+    for (const id of deleteIds) {
+      if (!existingIds.has(id)) continue;
+      await call('lists.element.delete', { IBLOCK_TYPE_ID: LIST_TYPE, IBLOCK_ID: listId, ELEMENT_ID: id });
+      deleted += 1;
+    }
+
+    await loadRecords();
+    let added = 0;
+    for (const item of missing) {
+      const targetCount = Number(item.expectedCount);
+      const signature = repairSignature(item.record);
+      let currentCount = cachedRecords.filter(record => repairSignature(record) === signature).length;
+      while (currentCount < targetCount) {
+        await addRecord(item.record);
+        currentCount += 1;
+        added += 1;
+      }
+    }
+
+    const result = await refresh();
+    result.repairResult = { deleted, added, total: cachedRecords.length, expectedTotal: Number(payload.expectedTotal || 0) };
+    return result;
+  }
+
+  window.DutyStaticStore = { init, install, importData, repairImport, api: route, refresh, call };
 })();

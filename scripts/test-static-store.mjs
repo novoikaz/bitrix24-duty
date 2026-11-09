@@ -99,4 +99,23 @@ await assert.rejects(
   /Хранилище уже содержит рабочие данные/
 );
 
+const repairPlan = {
+  version: 1,
+  kind: 'duty-static-repair',
+  expectedTotal: elements.length + 1,
+  duplicateIds: [],
+  missing: [{
+    count: 1,
+    currentCount: 0,
+    expectedCount: 1,
+    record: { record_type: 'audit', employee_id: 1, start_date: '2026-11-09', kind: 'Тест восстановления', note: 'Проверка', extra: 'legacy', name: 'Тест восстановления · Администратор Портала' }
+  }]
+};
+state = await DutyStaticStore.repairImport(repairPlan);
+assert.equal(state.repairResult.added, 1);
+assert.equal(state.audit.filter(item => item.action === 'Тест восстановления').length, 1);
+state = await DutyStaticStore.repairImport(repairPlan);
+assert.equal(state.repairResult.added, 0, 'Repair must be idempotent');
+assert.equal(state.audit.filter(item => item.action === 'Тест восстановления').length, 1);
+
 console.log('static store: ok');

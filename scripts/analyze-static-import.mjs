@@ -160,7 +160,7 @@ for (const [key, expectedCount] of expectedByKey) {
   const rows = currentByKey.get(key) || [];
   if (rows.length < expectedCount) {
     const record = JSON.parse(key);
-    missing.push({ count: expectedCount - rows.length, record });
+    missing.push({ count: expectedCount - rows.length, expectedCount, currentCount: rows.length, record });
   }
 }
 
@@ -171,6 +171,8 @@ const countByType = records => records.reduce((result, record) => {
 }, {});
 
 const result = {
+  version: 1,
+  kind: 'duty-static-repair',
   expectedTotal: expected.length,
   currentTotal: elements.length,
   duplicateCount: duplicateIds.length,
